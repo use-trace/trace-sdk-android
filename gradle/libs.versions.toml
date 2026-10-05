@@ -1,0 +1,18 @@
+[versions]
+# Android Gradle Plugin 8.7 is the pairing for Gradle 8.9, which the wrapper pins.
+agp = "8.7.3"
+kotlin = "2.0.21"
+# The only runtime dependency this SDK is allowed. Nothing else can read the Play Store install referrer.
+installreferrer = "2.2"
+junit = "4.13.2"
+# Robolectric 4.13 has no android-all jar for API 35, so its tests run against API 34. See robolectric.properties.
+robolectric = "4.13"
+
+[libraries]
+installreferrer = { module = "com.android.installreferrer:installreferrer", version.ref = "installreferrer" }
+junit = { module = "junit:junit", version.ref = "junit" }
+robolectric = { module = "org.robolectric:robolectric", version.ref = "robolectric" }
+
+[plugins]
+android-library = { id = "com.android.library", version.ref = "agp" }
+kotlin-android = { id = "org.jetbrains.kotlin.android", version.ref = "kotlin" }

@@ -1,3 +1,13 @@
 <?xml version="1.0" encoding="utf-8"?>
-<!-- The library declares no permissions and no components. The namespace comes from the Gradle file. -->
-<manifest xmlns:android="http://schemas.android.com/apk/res/android" />
+<!--
+  The library declares no permissions and no components. The namespace comes from the Gradle file.
+
+  The two backup attributes keep the install id out of Auto Backup and out of a device transfer. They reach a host
+  app only by manifest merge, and an app that sets either attribute itself wins, so the KDoc on InstallId tells an
+  integrator to carry the exclusions into their own rules files.
+-->
+<manifest xmlns:android="http://schemas.android.com/apk/res/android">
+    <application
+        android:dataExtractionRules="@xml/trace_data_extraction_rules"
+        android:fullBackupContent="@xml/trace_backup_rules" />
+</manifest>

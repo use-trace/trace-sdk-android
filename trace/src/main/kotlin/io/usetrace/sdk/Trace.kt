@@ -15,7 +15,7 @@ import java.util.concurrent.atomic.AtomicReference
  * class App : Application() {
  *     override fun onCreate() {
  *         super.onCreate()
- *         Trace.initialise(this, TraceConfig(apiKey = "trc_live_..."))
+ *         Trace.initialise(this, TraceConfig(apiKey = "trace_your_site_key"))
  *         // On every launch, from whatever the app itself stored when the person answered the banner.
  *         Trace.setConsent(analytics = consentStore.analytics, marketing = consentStore.marketing)
  *     }

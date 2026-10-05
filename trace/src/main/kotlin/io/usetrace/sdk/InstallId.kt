@@ -1,6 +1,7 @@
 package io.usetrace.sdk
 
 import android.content.Context
+import java.io.File
 import java.util.UUID
 
 /**
@@ -11,46 +12,36 @@ import java.util.UUID
  * hardware id, no fingerprint, so two installs on the same phone are two different people as far as Trace is
  * concerned, which is the correct answer.
  *
- * It lives in its own SharedPreferences file, `io.usetrace.sdk.installid`, and that file is excluded from Android
- * backup and from device transfer. An install id must not survive an uninstall: a restored id on a resold or
- * factory reset device would join a previous owner's installs to a new person. A reinstall therefore counts as a
- * new install, and over counting reinstalls is the better failure.
+ * **It does not survive an uninstall, and a host app cannot change that.** The id lives in a single file in
+ * `Context.getNoBackupFilesDir()`. Android excludes that directory from Auto Backup, from a device transfer and
+ * from a cross platform transfer, always: its documentation says files there "are always excluded even if you try
+ * to include them", and that a backup mode left out of an app's data extraction rules is "fully enabled for all
+ * content except for no-backup and cache directories". So the exclusion holds whatever the host app's
+ * `android:fullBackupContent` or `android:dataExtractionRules` say, and an integrator has nothing to carry across.
  *
- * **What a host app has to do.** The exclusions ship in this library's manifest, as
- * `android:fullBackupContent` and `android:dataExtractionRules`, and they only reach the built app by manifest
- * merge. An app that sets either attribute itself wins: the merge either fails with a conflict, which the usual
- * fix of `tools:replace` then resolves in the app's favour, or the app's own rules file is simply the one that is
- * used. Either way this library's file is dropped and nothing warns anybody at runtime. If your app has its own
- * backup rules, copy these two lines into them:
- *
- * ```xml
- * <!-- in your full-backup-content file -->
- * <exclude domain="sharedpref" path="io.usetrace.sdk.installid.xml" />
- * <!-- in your data-extraction-rules file, inside BOTH cloud-backup and device-transfer -->
- * <exclude domain="sharedpref" path="io.usetrace.sdk.installid.xml" />
- * ```
+ * It is excluded for two reasons. An install id identifies one install, so an id that came back after a reinstall
+ * would count the reinstall as the same install and the install numbers would be wrong. And it is a visitor
+ * identity: restoring it would quietly join a person back to the journey history they had before they uninstalled,
+ * which someone who removed the app may reasonably treat as finished. A reinstall therefore mints a fresh id and
+ * counts as a new install.
  *
  * The id is a visitor identity, so it is never logged, and this object never logs.
  */
 public object InstallId {
 
-    private const val PREFS_FILE: String = "io.usetrace.sdk.installid"
-    private const val PREFS_KEY: String = "install_id"
+    private const val FILE_NAME: String = "install_id"
 
     /**
      * Returns this install's id, minting and persisting one on the first call.
      *
-     * Call it from any thread: minting is guarded and the write is synchronous, so a crash straight after the
-     * first call cannot lose the id and mint a second one. It does no network work and never logs the value.
+     * Call it from any thread: minting is guarded. It does no network work and never logs the value. If the write
+     * fails it still returns an id, because an event with an id the SDK could not keep is better than a crash in
+     * someone else's app; the next launch mints a fresh one.
      */
     @JvmStatic
     public fun get(context: Context): String = synchronized(this) {
-        val prefs = prefs(context)
-        prefs.getString(PREFS_KEY, null) ?: mint().also {
-            // commit, not apply: an id that was handed out but not written would be minted again as a second
-            // install.
-            prefs.edit().putString(PREFS_KEY, it).commit()
-        }
+        val file = file(context)
+        read(file) ?: mint().also { runCatching { file.writeText(it) } }
     }
 
     /**
@@ -61,13 +52,17 @@ public object InstallId {
      * display it.
      */
     @JvmStatic
-    public fun peek(context: Context): String? = prefs(context).getString(PREFS_KEY, null)
+    public fun peek(context: Context): String? = read(file(context))
 
-    // The application context keeps the preferences off whatever short lived context was handed in. It is null
-    // when the SDK is called from Application.attachBaseContext or a ContentProvider that runs before the
-    // application object exists, so fall back to the given context rather than crash the host app.
-    private fun prefs(context: Context) =
-        (context.applicationContext ?: context).getSharedPreferences(PREFS_FILE, Context.MODE_PRIVATE)
+    // The application context keeps the file off whatever short lived context was handed in. It is null when the
+    // SDK is called from Application.attachBaseContext or a ContentProvider that runs before the application
+    // object exists, so fall back to the given context rather than crash the host app.
+    private fun file(context: Context): File =
+        File((context.applicationContext ?: context).noBackupFilesDir, FILE_NAME)
+
+    // A half written or unreadable file is treated as no id, so the next get mints one.
+    private fun read(file: File): String? =
+        runCatching { file.readText().trim().ifEmpty { null } }.getOrNull()
 
     private fun mint(): String = "auk_app_" + UUID.randomUUID().toString().replace("-", "")
 }

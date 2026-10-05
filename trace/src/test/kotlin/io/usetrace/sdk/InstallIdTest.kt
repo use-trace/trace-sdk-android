@@ -2,7 +2,7 @@ package io.usetrace.sdk
 
 import android.content.Context
 import org.junit.Assert.assertEquals
-import org.junit.Assert.assertNotNull
+import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
 import org.junit.Test
@@ -15,7 +15,7 @@ import java.io.File
  * The install id is the SDK's whole identity. These tests hold it to three things: it is stable, it is shaped the
  * way the server expects, and reading it does not create it.
  *
- * Robolectric gives a real SharedPreferences, so the file the backup rules exclude is the file these tests write.
+ * Robolectric gives a real file system, so the file these tests write is the file the SDK writes on a device.
  */
 @RunWith(RobolectricTestRunner::class)
 class InstallIdTest {
@@ -49,40 +49,15 @@ class InstallIdTest {
     }
 
     @Test
-    fun `the install id file is excluded from backup and from device transfer`() {
-        val legacy = readRes("trace_backup_rules.xml")
-        assertTrue(
-            "full-backup-content does not exclude the install id file",
-            legacy.contains("""<exclude domain="sharedpref" path="io.usetrace.sdk.installid.xml" />"""),
-        )
+    fun `the id is stored where android never backs it up`() {
+        val id = InstallId.get(context)
 
-        // Android 12 and later ignore the file above. A device transfer is the resold phone case, so an exclusion
-        // that covers only cloud-backup leaves the worst failure open.
-        val modern = readRes("trace_data_extraction_rules.xml")
-        val cloudBackup = section(modern, "cloud-backup")
-        val deviceTransfer = section(modern, "device-transfer")
-        assertTrue(
-            "cloud-backup does not exclude the install id file",
-            cloudBackup.contains("""<exclude domain="sharedpref" path="io.usetrace.sdk.installid.xml" />"""),
-        )
-        assertTrue(
-            "device-transfer does not exclude the install id file",
-            deviceTransfer.contains("""<exclude domain="sharedpref" path="io.usetrace.sdk.installid.xml" />"""),
-        )
-    }
-
-    /** The unit tests run with the module directory as the working directory, the repository root in some IDEs. */
-    private fun readRes(name: String): String {
-        val candidates = listOf(File("src/main/res/xml/$name"), File("trace/src/main/res/xml/$name"))
-        val file = candidates.firstOrNull { it.isFile }
-        assertNotNull("$name is missing, looked in ${candidates.joinToString()}", file)
-        return file!!.readText()
-    }
-
-    private fun section(xml: String, tag: String): String {
-        val start = xml.indexOf("<$tag>")
-        val end = xml.indexOf("</$tag>")
-        assertTrue("$tag section is missing", start >= 0 && end > start)
-        return xml.substring(start, end)
+        // getNoBackupFilesDir is the only storage a host app cannot opt back into a backup. Android excludes it
+        // from Auto Backup and from a transfer whatever the app's own backup rules say, and a missing section in
+        // those rules enables that mode for everything except the no-backup and cache directories.
+        val stored = File(context.noBackupFilesDir, "install_id")
+        assertTrue("nothing was written to the no-backup directory", stored.isFile)
+        assertEquals(id, stored.readText())
+        assertFalse("the id is in files, which Auto Backup includes", File(context.filesDir, "install_id").exists())
     }
 }

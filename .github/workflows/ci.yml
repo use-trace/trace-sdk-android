@@ -1,0 +1,25 @@
+name: CI
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+jobs:
+  copy-rules:
+    name: copy rules
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: No em dashes or en dashes
+        run: |
+          # A house rule across every Trace repository. Checked from the first commit, because retrofitting it
+          # across a grown codebase is the expensive way to find out it was never enforced.
+          if grep -rInP '[\x{2014}\x{2013}]' --exclude-dir=.git . ; then
+            echo "Found an em dash or en dash. Use commas, colons or full stops."
+            exit 1
+          fi
+          echo "Clean."
+
+  # The Gradle build and unit test jobs are added with the first code. A workflow that fails because there is
+  # nothing to build teaches everyone to ignore a red tick, which is worse than having no job yet.

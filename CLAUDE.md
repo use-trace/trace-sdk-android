@@ -48,5 +48,5 @@ the SDK gets it wrong, which is why they are here rather than in a comment somew
 
 ## Repository status
 
-Empty. There is no Gradle project yet. CI currently runs the house copy rules only; the build and test jobs join it
-with the first code, rather than sitting red from day one.
+The Gradle project exists and builds: one library module, `trace`. CI runs the house copy rules, a build job and a
+unit test job. The SDK's own classes are not written yet; the plan in `docs/` says which task owns each file.

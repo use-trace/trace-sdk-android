@@ -61,10 +61,13 @@ silently ignores the event behind a 200. Send `TraceSdkAndroid/<sdk version> (An
 
 ## Two decisions already made, do not reopen
 
-- **An install id does not survive an uninstall.** It is excluded from Android Auto Backup. Auto Backup is opt out,
-  so a restored key can land on a resold or factory reset device and join a previous owner's installs to a new
-  person. A reinstall therefore mints a fresh id and counts as a new install. Over counting reinstalls is the
-  better failure.
+- **An install id does not survive an uninstall.** It is held in `Context.getNoBackupFilesDir()`, which Android
+  excludes from Auto Backup, from a device transfer and from a cross platform transfer, whatever the host app's
+  backup rules say. Two reasons. An install id identifies one install, so an id that came back after a reinstall
+  would count the reinstall as the same install and the install numbers would be wrong. And it is a visitor
+  identity: restoring it would quietly join a person back to the journey history they had before they uninstalled,
+  which someone who removed the app may reasonably treat as finished. A reinstall therefore mints a fresh id and
+  counts as a new install. Over counting reinstalls is the better failure.
 - **Android native only.** No React Native or Flutter wrapper in this slice. The public surface must contain no
   Android specific types in its signatures beyond `Context` at initialisation, so a wrapper stays possible later.
 
@@ -77,11 +80,10 @@ gradle/libs.versions.toml
 trace/
   build.gradle.kts
   src/main/AndroidManifest.xml
-  src/main/res/xml/trace_backup_rules.xml
   src/main/kotlin/io/usetrace/sdk/
     Trace.kt              public API, the only file a customer reads
     TraceConfig.kt        api key, api url, debug logging flag
-    InstallId.kt          persist, expose, exclude from backup
+    InstallId.kt          persist in the no-backup directory, expose
     InstallReferrer.kt    Play Install Referrer wrapper
     Transport.kt          HttpURLConnection, JSON, User-Agent, retry
     ConsentGate.kt        hold, flush, discard
@@ -114,40 +116,31 @@ An Android library module named `trace`, group `io.usetrace`, artefact `trace-sd
 ### Task 2: the install id, which does not survive an uninstall
 
 **Files:** `trace/src/main/kotlin/io/usetrace/sdk/InstallId.kt`,
-`trace/src/main/res/xml/trace_backup_rules.xml`, `trace/src/main/AndroidManifest.xml` (modify),
 `trace/src/test/kotlin/io/usetrace/sdk/InstallIdTest.kt`
 
 **Produces:** `InstallId.get(context: Context): String` and `InstallId.peek(context: Context): String?`
 
-- [ ] **Write the failing tests** (Robolectric, so a real `SharedPreferences`):
+- [ ] **Write the failing tests** (Robolectric, so a real file system and a real `Context`):
   - `get` returns the same value on a second call, because an install id that changes is not an install id.
   - `get` returns a value matching `^auk_app_[0-9a-f]{32}$`. The `auk_` prefix is what the server's other keys use;
     `app_` says where it came from.
   - `peek` returns null before any `get`, and the id afterwards. The host app needs to read the id without
     creating one, so a privacy screen can say "no id yet" truthfully.
   - Two different `Context`s with the same package share the id.
-- [ ] **Implement.** A dedicated `SharedPreferences` file named `io.usetrace.sdk.installid`, key `install_id`,
-  value `"auk_app_" + UUID.randomUUID().toString().replace("-", "")`. Generate with `java.util.UUID`, never from
-  anything about the device.
-- [ ] **Exclude it from backup.** `trace/src/main/res/xml/trace_backup_rules.xml`:
-
-```xml
-<?xml version="1.0" encoding="utf-8"?>
-<!--
-  The install id must not survive an uninstall. Auto Backup is opt out, so a restored id can land on a resold or
-  factory reset device and join a previous owner's installs to a new person. Over counting a reinstall is the
-  better failure, so this file is deliberate, not an oversight.
--->
-<full-backup-content>
-    <exclude domain="sharedpref" path="io.usetrace.sdk.installid.xml" />
-</full-backup-content>
-```
-
-  And a `data_extraction_rules.xml` equivalent for Android 12 and later, excluding the same file from both
-  `cloud-backup` and `device-transfer`. Reference both from the library manifest so a host app inherits them by
-  manifest merge, and KDoc that a host app overriding `android:fullBackupContent` must carry the exclusion across.
-- [ ] **A test that the exclusion exists**, asserting both XML files contain that path. It is not testable at
-  runtime, so pin it as a file assertion rather than leave it unguarded. Name it after the behaviour.
+- [ ] **Implement.** A single file named `install_id` in `Context.getNoBackupFilesDir()`, holding
+  `"auk_app_" + UUID.randomUUID().toString().replace("-", "")`. Generate with `java.util.UUID`, never from
+  anything about the device. A plain file read and write, not `SharedPreferences`.
+- [ ] **Keep it out of a backup, with the mechanism no host app can override.** `getNoBackupFilesDir()` is enough
+  on its own: Android's documentation says files in it "are always excluded even if you try to include them", and
+  that a backup mode left out of an app's data extraction rules is "fully enabled for all content except for
+  no-backup and cache directories". So there is no `trace_backup_rules.xml`, no `data_extraction_rules.xml` and no
+  `android:fullBackupContent` or `android:dataExtractionRules` on the library manifest. Those were the earlier
+  design and they do not hold: a library manifest attribute merges only into an app that sets none of its own, an
+  app that sets its own gets a merge conflict, and the `tools:replace` the merger suggests then drops the library's
+  rules with no warning at all. Verified against a throwaway host app module. KDoc the guarantee, and say plainly
+  that an integrator has nothing to carry across.
+- [ ] **A test that the id is stored under `getNoBackupFilesDir()`**, not merely that it reads back, because
+  reading back would pass from any directory. Name it after the behaviour.
 - [ ] Commit.
 
 ---
@@ -228,8 +221,9 @@ apologise later.
   - the queue is bounded, and the oldest event is dropped first past the bound, so a never answered banner cannot
     grow without limit. Bound it at 100 events and log when one is dropped.
   - the held queue is cleared from disk after a flush and after a discard, so a denial leaves nothing behind
-- [ ] **Implement.** Persist the queue as JSON lines in the SDK's own file in `context.filesDir`. Exclude that file
-  from backup too, by the same reasoning as the install id.
+- [ ] **Implement.** Persist the queue as JSON lines in the SDK's own file in `context.noBackupFilesDir`, the same
+  directory as the install id and for the same reason: it carries that id, so a restored queue would say the same
+  wrong thing.
 - [ ] Commit.
 
 ---
@@ -306,5 +300,5 @@ object Trace {
 
 - A reinstall mints a fresh install id and counts as a new install.
 - An install referrer the Play Store will not supply makes the install direct, not an error.
-- A host app that overrides `android:fullBackupContent` must carry the backup exclusions across, or the install id
-  can survive an uninstall and reach a different person.
+- The install id is held in `getNoBackupFilesDir()`, so it is never backed up, transferred or restored, and a host
+  app's own backup configuration cannot change that.

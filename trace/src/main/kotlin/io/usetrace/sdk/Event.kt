@@ -1,5 +1,6 @@
 package io.usetrace.sdk
 
+import org.json.JSONObject
 import java.text.SimpleDateFormat
 import java.util.Date
 import java.util.Locale
@@ -97,6 +98,46 @@ internal data class Event(
             SimpleDateFormat("yyyy-MM-dd'T'HH:mm:ss.SSS'Z'", Locale.US)
                 .apply { timeZone = TimeZone.getTimeZone("UTC") }
                 .format(Date())
+
+        /**
+         * One event read back from the line [toJson] wrote, or null when the line is not one.
+         *
+         * The consent gate holds events on disk in the wire form, so this is the only reader the SDK has and the
+         * stored form cannot drift from the sent form. Null covers a line a process left half written when it was
+         * killed, and an event type or consent state this version of the SDK does not know, which a newer one may
+         * have queued before an app downgrade. It never throws: a queue file the SDK cannot read is a queue it
+         * drops, not an exception on the launch path of somebody else's app.
+         *
+         * `org.json` is Android's own parser, in the framework since API 1, so reading costs the customer's app no
+         * dependency. Writing stays hand rolled because `JSONObject` reorders fields and the sent body should read
+         * the way the contract is written.
+         */
+        internal fun fromJson(line: String): Event? = runCatching {
+            val json = JSONObject(line)
+            Event(
+                type = EventType.valueOf(json.getString("event_type")),
+                anonUserKey = json.getString("anon_user_key"),
+                consentStatus = ConsentState.valueOf(json.getString("consent_status")),
+                timestamp = json.getString("timestamp"),
+                appVersion = json.stringOrNull("app_version"),
+                installReferrer = json.stringOrNull("install_referrer"),
+                eventName = json.stringOrNull("event_name"),
+                value = json.doubleOrNull("value"),
+                conversionTypeId = json.stringOrNull("conversion_type_id"),
+                conversionValue = json.doubleOrNull("conversion_value"),
+                metadata = json.optJSONObject("metadata")?.let { metadata ->
+                    metadata.keys().asSequence().associateWith { metadata.getString(it) }
+                } ?: emptyMap(),
+            )
+        }.getOrNull()
+
+        // optString answers an empty string for a field that is not there, which would turn an absent app version
+        // into "". Absent and empty are different things on the wire, so ask first.
+        private fun JSONObject.stringOrNull(name: String): String? =
+            if (has(name) && !isNull(name)) getString(name) else null
+
+        private fun JSONObject.doubleOrNull(name: String): Double? =
+            if (has(name) && !isNull(name)) getDouble(name) else null
     }
 }
 

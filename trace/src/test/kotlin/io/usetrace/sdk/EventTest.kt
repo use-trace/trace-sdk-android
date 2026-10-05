@@ -3,6 +3,7 @@ package io.usetrace.sdk
 import org.json.JSONObject
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
+import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
 import org.junit.Test
 import org.junit.runner.RunWith
@@ -112,6 +113,53 @@ class EventTest {
         assertEquals(12.5, body.getDouble("conversion_value"), 0.0)
         assertEquals("ct_42", body.getString("conversion_type_id"))
         assertEquals("plus", body.getJSONObject("metadata").getString("plan"))
+    }
+
+
+    @Test
+    fun `an event read back from its own json is the event that was written`() {
+        // The consent gate holds events on disk in exactly this form, so the wire body is also the stored body:
+        // one format, which cannot disagree with itself. Everything awkward is in here because a queue written
+        // before a process died is read by the next process and nothing gets a second chance to escape it.
+        val awkward = "say \"hi\" \\ then\nnew\tline 😀 日本語"
+        val event = Event(
+            type = EventType.PURCHASE,
+            anonUserKey = key,
+            consentStatus = ConsentState.UNKNOWN,
+            appVersion = "1.4.2",
+            installReferrer = "utm_source=google-play&gclid=EAIaIQobChMI%2Fnot-real",
+            eventName = awkward,
+            value = 12.5,
+            conversionTypeId = "ct_42",
+            conversionValue = 12.5,
+            metadata = mapOf(awkward to awkward),
+        )
+
+        assertEquals(event, Event.fromJson(event.toJson()))
+    }
+
+    @Test
+    fun `an event carried over one line holds no newline, so a line is a whole event`() {
+        val event = Event(
+            type = EventType.CUSTOM,
+            anonUserKey = key,
+            consentStatus = ConsentState.UNKNOWN,
+            eventName = "two\nlines\r\nand a return",
+        )
+
+        assertFalse("a stored event spanning two lines would be read back as two broken ones", "\n" in event.toJson())
+    }
+
+    @Test
+    fun `a half written or unparsable line is not an event`() {
+        // The last line of a queue file written by a process that was killed mid write. It is dropped, because the
+        // alternative is an exception on the launch path of somebody else's app.
+        assertNull(Event.fromJson("{\"event_type\":\"FIRST_OPEN\",\"anon_user_k"))
+        assertNull(Event.fromJson(""))
+        // An event type a later SDK version sends and this one has never heard of.
+        assertNull(Event.fromJson("{\"event_type\":\"SCREEN_VIEW\",\"anon_user_key\":\"$key\",\"timestamp\":\"now\"}"))
+        // An event with no key could not be sent anyway: the server refuses an install without one, deliberately.
+        assertNull(Event.fromJson("{\"event_type\":\"FIRST_OPEN\",\"timestamp\":\"now\"}"))
     }
 
     @Test

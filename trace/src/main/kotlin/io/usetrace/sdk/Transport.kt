@@ -6,6 +6,27 @@ import java.net.HttpURLConnection
 import java.net.URL
 
 /**
+ * What the consent gate sends through, and the only part of the transport anything else in the SDK may depend on.
+ *
+ * It exists so a test can stand in for the network without copying the real class's shape: a hand written double
+ * drifts from [Transport] the moment [Transport] changes, and a drifting double is a test that passes while the
+ * thing it stands for is broken. Internal, like everything else here: a customer gets no transport API and cannot
+ * replace the network layer.
+ */
+internal interface EventSender {
+
+    /** Sends one event, returning whether the server took it. Never throws. */
+    fun send(event: Event): Boolean
+
+    /**
+     * Sends the consent answers under [key], returning whether the server took them. Never throws.
+     *
+     * [key] is not optional: see [Transport.sendConsent] for what the server does without it.
+     */
+    fun sendConsent(key: String, analytics: Boolean, marketing: Boolean): Boolean
+}
+
+/**
  * The only thing in this SDK that touches the network. `HttpURLConnection` and nothing else: a customer's app does
  * not gain okhttp because it gained Trace.
  *
@@ -24,7 +45,7 @@ internal class Transport(
     apiUrl: String,
     /** Connect and read timeout. Ten seconds in a real app; the tests use a short one deliberately. */
     private val timeoutMillis: Int = 10_000,
-) {
+) : EventSender {
 
     private val baseUrl: String = apiUrl.trimEnd('/')
 
@@ -34,7 +55,7 @@ internal class Transport(
      * True means a 2xx. False means the server refused it or could not be reached, and the caller still holds the
      * only copy: nothing here retries a 4xx, because a payload the server rejected it will reject again.
      */
-    internal fun send(event: Event): Boolean {
+    override fun send(event: Event): Boolean {
         val accepted = post("/v1/event", event.toJson())
         TraceLog.log("${event.type} ${if (accepted) "accepted" else "not accepted"}")
         return accepted
@@ -48,7 +69,7 @@ internal class Transport(
      * without one makes the server mint a key of its own and record it as though it were the app's install id,
      * which is a false provenance rather than a missing field.
      */
-    internal fun sendConsent(key: String, analytics: Boolean, marketing: Boolean): Boolean {
+    override fun sendConsent(key: String, analytics: Boolean, marketing: Boolean): Boolean {
         val body = Json.obj(
             "consent_analytics" to analytics,
             "consent_marketing" to marketing,

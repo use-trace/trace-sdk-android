@@ -51,10 +51,28 @@ internal object TraceLog {
      */
     internal fun log(message: String) {
         if (!debugLogging) return
+        write(message, Log.DEBUG)
+    }
+
+    /**
+     * Writes one line whether or not logging was turned on, with anything identity shaped removed first.
+     *
+     * For the one mistake a host app can make before it has turned logging on: calling the api before
+     * [Trace.initialise]. `debugLogging` arrives with the config, so a misuse that happens earlier than that would
+     * otherwise be reported into a log nobody can switch on. Nothing in normal running uses this, so a quiet app
+     * stays quiet.
+     *
+     * It is redacted like any other line. Louder is not laxer.
+     */
+    internal fun warn(message: String) {
+        write(message, Log.WARN)
+    }
+
+    private fun write(message: String, priority: Int) {
         val safe = runCatching { redact(message) }.getOrDefault(REDACTED)
         runCatching {
             val target = sink
-            if (target != null) target(safe) else Log.d(TAG, safe)
+            if (target != null) target(safe) else Log.println(priority, TAG, safe)
         }
     }
 

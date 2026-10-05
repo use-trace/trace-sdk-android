@@ -93,4 +93,31 @@ class TraceLogTest {
 
         assertEquals("PURCHASE refused with 400, attempt 1 of 3, giving up", lines.single())
     }
+
+    @Test
+    fun `a misuse of the api is reported even though logging is off`() {
+        TraceLog.redirect { lines.add(it) }
+        TraceLog.debugLogging = false
+
+        TraceLog.warn("Trace.conversion was called before Trace.initialise, so nothing was sent")
+
+        // debugLogging cannot be set before initialise, and calling the api before initialise is the one mistake
+        // that happens before it. A warning only the correctly configured app can read is a warning nobody reads.
+        assertEquals(
+            listOf("Trace.conversion was called before Trace.initialise, so nothing was sent"),
+            lines,
+        )
+    }
+
+    @Test
+    fun `a warning is redacted like any other line`() {
+        TraceLog.redirect { lines.add(it) }
+        TraceLog.debugLogging = false
+
+        TraceLog.warn("identify refused someone@example.com")
+
+        // Louder is not laxer. A line that skips the debug flag must not skip the sink that strips an identity.
+        assertTrue(TraceLog.REDACTED in lines.single())
+        assertFalse("an email address reached the log", "example.com" in lines.single())
+    }
 }

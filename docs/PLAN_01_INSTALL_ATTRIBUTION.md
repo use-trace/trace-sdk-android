@@ -51,6 +51,11 @@ Both routes take the header `x-trace-api-key: <site key>` and return JSON.
 
 `POST {apiUrl}/v1/consent`, fields: `consent_analytics`, `consent_marketing`, `anon_user_key`.
 
+**Success is any 2xx, and it is not a 200.** `/v1/event` answers 202 and `/v1/consent` answers 201, verified in the
+controllers, so a client that tested for 200 would read every successful send as a failure, retry a request the
+server had already taken, and finally report the install as lost. Treat 200 to 299 as taken, a 4xx as refused and
+not worth retrying, and a 5xx as worth retrying.
+
 **`anon_user_key` on the consent call is not optional.** On a consent gated site the server buffers the first open
 and replays it after consent, taking the key from the consent call. Omit it and the server mints its own key and
 labels it as the app's install id, which is a false provenance. This is written in `.claude/rules/app-tracking.md`
@@ -186,7 +191,9 @@ expects, so **send it raw and parse nothing here.** Parsing it twice is how the 
   - `anon_user_key` is present on every event, and on the consent call
   - a `FIRST_OPEN` carrying a referrer sends it byte for byte, percent encoding intact
   - JSON encodes a quote, a backslash and a newline in a campaign name without producing invalid JSON
-  - a 200 returns true; a 400 returns false and does not retry, because a rejected payload will be rejected again
+  - a 2xx returns true, with the stub answering 202 for an event and 201 for a consent call as the API really does,
+    because a client that only accepted 200 would read every successful send as a failure
+  - a 400 returns false and does not retry, because a rejected payload will be rejected again
   - a 500 retries, and gives up after three attempts in total
   - a connection refused returns false rather than throwing out of `send`
   - no log line contains the install id, asserted by capturing the SDK's own log output

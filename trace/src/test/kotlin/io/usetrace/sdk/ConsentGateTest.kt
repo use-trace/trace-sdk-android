@@ -9,7 +9,6 @@ import org.junit.Test
 import org.junit.runner.RunWith
 import org.robolectric.RobolectricTestRunner
 import org.robolectric.RuntimeEnvironment
-import java.io.File
 
 /**
  * The consent gate, against a fake [EventSender] that records the order of what it was asked to send.
@@ -20,15 +19,16 @@ import java.io.File
  * though it were the app's install id, which is a false provenance rather than a missing field, and nothing on the
  * client can see it happen. So these tests assert the sequence, not merely that both were sent.
  *
- * Robolectric, because the held queue is a real file in a real no-backup directory and the test that matters most
- * is the one that reads it back through a second gate.
+ * Robolectric, because the install id is a real file in a real no-backup directory, and what these tests also prove
+ * is that nothing else is: the held queue lives in memory only.
  */
 @RunWith(RobolectricTestRunner::class)
 class ConsentGateTest {
 
     private val context: Context get() = RuntimeEnvironment.getApplication()
 
-    private val queueFile: File get() = File(context.noBackupFilesDir, "held_events")
+    /** Every file in the SDK's only directory. */
+    private fun written(): List<String> = context.noBackupFilesDir.listFiles().orEmpty().map { it.name }.sorted()
 
     @After
     fun tearDown() {
@@ -62,9 +62,11 @@ class ConsentGateTest {
 
     private fun gate(sender: EventSender) = ConsentGate(context, sender)
 
+    // Recorded with no key, as the SDK records it: the install id does not exist before consent is granted, and the
+    // gate fills it in when the event is sent.
     private fun event(name: String, type: EventType = EventType.CUSTOM) = Event(
         type = type,
-        anonUserKey = InstallId.get(context),
+        anonUserKey = "",
         consentStatus = ConsentState.UNKNOWN,
         eventName = name,
     )
@@ -177,7 +179,7 @@ class ConsentGateTest {
             listOf("consent analytics=true marketing=false", "event CUSTOM afterwards"),
             sender.calls,
         )
-        assertFalse("an event sent straight away should not also be held", queueFile.exists())
+        assertEquals(listOf(InstallId.peek(context)), sender.events.map { it.anonUserKey })
     }
 
     @Test
@@ -191,25 +193,40 @@ class ConsentGateTest {
         gate.record(event("afterwards"))
 
         assertEquals(emptyList<String>(), sender.calls)
-        assertFalse("a dropped event should not be written to disk either", queueFile.exists())
+        assertEquals("a dropped event should not be written to disk either", listOf("install_id"), written())
     }
 
     @Test
-    fun `the queue survives process death`() {
+    fun `the queue is in memory only, so it does not survive process death`() {
         val sender = RecordingSender()
 
         // The first lifetime: the app is opened, the first open is recorded, the banner is still on screen and the
         // process is killed. The gate object goes with it, so the second lifetime gets a new one.
         gate(RecordingSender()).record(event("the install", EventType.FIRST_OPEN))
+        assertEquals("nothing may be written before consent", emptyList<String>(), written())
 
         val next = gate(sender)
-        assertEquals(ConsentState.UNKNOWN, next.state)
         next.setConsent(analytics = true, marketing = false)
 
-        // The install is the one event that cannot be sent again, so losing it to a kill is losing the channel that
-        // paid for it. Nothing in memory can prove this: it has to come off disk.
-        assertEquals(listOf("the install"), sender.events.map { it.eventName })
-        assertEquals(EventType.FIRST_OPEN, sender.events.single().type)
+        // Decided 6 October 2026: nothing is stored before consent, and losing what was held to a kill is the cost.
+        // The next launch has written no first open flag, so it records its own first open.
+        assertEquals(emptyList<Event>(), sender.events)
+    }
+
+    @Test
+    fun `held events are sent under the install id the grant wrote`() {
+        val sender = RecordingSender()
+        val gate = gate(sender)
+
+        gate.record(event("first", EventType.FIRST_OPEN))
+        gate.record(event("second"))
+        assertEquals(emptyList<String>(), written())
+        gate.setConsent(analytics = true, marketing = false)
+
+        val id = InstallId.peek(context)
+        assertEquals(listOf(id, id), sender.events.map { it.anonUserKey })
+        assertEquals(listOf(id), sender.consentKeys)
+        assertEquals(listOf("first_open_sent", "install_id"), written())
     }
 
     @Test
@@ -220,7 +237,7 @@ class ConsentGateTest {
         repeat(105) { gate.record(event("event $it")) }
         gate.setConsent(analytics = true, marketing = false)
 
-        // A banner nobody ever answers must not grow a file without limit, and when something has to go it is the
+        // A banner nobody ever answers must not grow the queue without limit, and when something has to go it is the
         // oldest: the newest conversions are the ones still worth sending.
         assertEquals(100, sender.events.size)
         assertEquals("event 5", sender.events.first().eventName)
@@ -242,41 +259,5 @@ class ConsentGateTest {
             // is full of install ids and referrers, which makes this the easiest place in the SDK to leak one.
             assertFalse("a line had to be redacted, so something tried to log an identity: $line", TraceLog.REDACTED in line)
         }
-    }
-
-    @Test
-    fun `a flush leaves nothing on disk`() {
-        val sender = RecordingSender()
-        val gate = gate(sender)
-
-        gate.record(event("first", EventType.FIRST_OPEN))
-        assertTrue("a held event should be on disk before the flush", queueFile.isFile)
-        gate.setConsent(analytics = true, marketing = false)
-
-        assertFalse("a flushed queue left its events on disk, so a later launch would send them again", queueFile.exists())
-    }
-
-    @Test
-    fun `a discard leaves nothing on disk`() {
-        val gate = gate(RecordingSender())
-
-        gate.record(event("first", EventType.FIRST_OPEN))
-        assertTrue("a held event should be on disk before the denial", queueFile.isFile)
-        gate.setConsent(analytics = false, marketing = false)
-
-        // Emptying a list in memory is not a discard. A denial that leaves the events in a file has kept them, and
-        // the next launch would read them back and send them.
-        assertFalse("a denial left the events it discarded on disk", queueFile.exists())
-    }
-
-    @Test
-    fun `the queue is held where android never backs it up`() {
-        gate(RecordingSender()).record(event("first", EventType.FIRST_OPEN))
-
-        // The same directory as the install id, for the same reason: the queue carries that id, so a queue restored
-        // onto a later install would send events for a visitor who no longer exists. getNoBackupFilesDir is the one
-        // place a host app's own backup rules cannot opt back in.
-        assertTrue("nothing was written to the no-backup directory", queueFile.isFile)
-        assertFalse("the queue is in files, which Auto Backup includes", File(context.filesDir, "held_events").exists())
     }
 }

@@ -49,6 +49,43 @@ class TransportTest {
         installReferrer = referrer,
     )
 
+    /**
+     * The README's "What to declare to the stores" says what leaves the device, for the Play Data safety form. This
+     * is that list, read off the wire with every field filled in. A field added to an event or to the consent call
+     * fails here until the README says what it is and this list names it.
+     */
+    @Test
+    fun `every field that leaves the device is one the store declarations name`() {
+        val declared = setOf(
+            // The install id, and what kind of client sent it.
+            "anon_user_key", "source_type", "platform", "store",
+            // The event: what happened, when, under which consent answer, on which version of the app, and for a
+            // first open the Play Store install referrer.
+            "event_type", "timestamp", "consent_status", "app_version", "install_referrer",
+            // A conversion: the app's name for it, its value and its metadata. The SDK never fills in the two
+            // conversion_ fields today; they are named so that starting to send them is still a change seen here.
+            "event_name", "value", "metadata", "conversion_type_id", "conversion_value",
+            // The consent call: the two answers.
+            "consent_analytics", "consent_marketing",
+        )
+        val api = stub()
+        val transport = transport(api.url)
+
+        transport.send(
+            firstOpen().copy(
+                eventName = "purchase",
+                value = 1.0,
+                conversionTypeId = "ct",
+                conversionValue = 1.0,
+                metadata = mapOf("plan" to "plus"),
+            ),
+        )
+        transport.sendConsent(key, analytics = true, marketing = false)
+
+        assertEquals(2, api.requests.size)
+        assertEquals(declared, api.requests.flatMap { it.json().keys().asSequence().toList() }.toSet())
+    }
+
     @Test
     fun `the api key travels on the event and on the consent call`() {
         val api = stub()

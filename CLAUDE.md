@@ -65,6 +65,8 @@ SDK is written: `Trace` and `TraceConfig` are its whole public surface, and ever
 `internal` (`BuildConfig` is public because the Android Gradle plugin generates it so). The plan in `docs/` records
 which task built each file.
 
-`privacy` is `scripts/check-privacy.sh`: the rules above, as a check. `api` compares the public API with
+`privacy` is `scripts/check-privacy.sh`: the rules above, as a check. The README's "What to declare to the stores"
+is what customers put in the Play Data safety form, so sending a new field changes it in the same pull request;
+`every field that leaves the device is one the store declarations name` in `TransportTest` fails until it does. `api` compares the public API with
 `trace/api/trace.api`; after a deliberate change to anything public, run `./gradlew :trace:apiDump` and commit the
 file with the change.

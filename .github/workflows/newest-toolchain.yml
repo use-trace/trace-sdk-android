@@ -1,0 +1,84 @@
+name: newest toolchain
+
+# Every week, the build and the unit tests on the newest stable Android Gradle plugin, Kotlin, Gradle, compileSdk and
+# LTS JDK, whatever gradle/libs.versions.toml pins (docs/plans/REPO_AUTOMATION.md in use-trace/trace, Android task 6).
+# Dependabot moves the pinned versions; this catches a break in the gap between its pull requests, and tells you before
+# a customer on the newest Android Studio does. The versions are applied to a throwaway checkout and never committed.
+# A failure opens one incident issue and alerts through the monorepo's shared recorder; a later pass closes it.
+
+on:
+  schedule:
+    - cron: '23 3 * * 1'
+  workflow_dispatch:
+  # Temporary, to prove the workflow on its pull request. Removed before merge.
+  pull_request:
+    paths: [.github/workflows/newest-toolchain.yml]
+
+permissions:
+  contents: read
+
+jobs:
+  newest:
+    name: newest
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v7
+      - id: v
+        name: The newest stable versions
+        run: |
+          stable() { grep -oE '<version>[0-9]+\.[0-9]+\.[0-9]+</version>' | sed -E 's#</?version>##g' | sort -V | tail -1; }
+          agp=$(curl -fsS https://dl.google.com/dl/android/maven2/com/android/tools/build/gradle/maven-metadata.xml | stable)
+          kotlin=$(curl -fsS https://repo1.maven.org/maven2/org/jetbrains/kotlin/kotlin-gradle-plugin/maven-metadata.xml | stable)
+          gradle=$(curl -fsS https://services.gradle.org/versions/current | jq -er .version)
+          jdk=$(curl -fsS https://api.adoptium.net/v3/info/available_releases | jq -er .most_recent_lts)
+          # Stable platforms are android-36, then android-37.0, 37.1 and so on; betas, extensions and canaries are not.
+          sdk=$(curl -fsS https://dl.google.com/android/repository/repository2-3.xml | grep -oE 'path="platforms;android-[0-9]+(\.[0-9]+)?"' | grep -oE '[0-9]+(\.[0-9]+)?"' | cut -d. -f1 | tr -d '"' | sort -n | tail -1)
+          for x in agp kotlin gradle jdk sdk; do [ -n "${!x}" ] || { echo "Could not read the newest $x." >&2; exit 1; }; done
+          printf 'agp=%s\nkotlin=%s\ngradle=%s\njdk=%s\nsdk=%s\n' "$agp" "$kotlin" "$gradle" "$jdk" "$sdk" | tee -a "$GITHUB_OUTPUT"
+          printf 'Android Gradle plugin %s, Kotlin %s, Gradle %s, JDK %s, compileSdk %s\n' "$agp" "$kotlin" "$gradle" "$jdk" "$sdk" >> "$GITHUB_STEP_SUMMARY"
+      - name: Use them
+        env:
+          AGP: ${{ steps.v.outputs.agp }}
+          KOTLIN: ${{ steps.v.outputs.kotlin }}
+          GRADLE: ${{ steps.v.outputs.gradle }}
+          SDK: ${{ steps.v.outputs.sdk }}
+        run: |
+          sed -i -E "s/^agp = \".*\"/agp = \"$AGP\"/; s/^kotlin = \".*\"/kotlin = \"$KOTLIN\"/" gradle/libs.versions.toml
+          sed -i -E "s#gradle-[^/]+-bin\.zip#gradle-$GRADLE-bin.zip#" gradle/wrapper/gradle-wrapper.properties
+          sed -i -E "s/compileSdk = [0-9]+/compileSdk = $SDK/" trace/build.gradle.kts
+          # A pattern that stopped matching would test the pinned versions and pass, so check each one took.
+          grep -qx "agp = \"$AGP\"" gradle/libs.versions.toml
+          grep -qx "kotlin = \"$KOTLIN\"" gradle/libs.versions.toml
+          grep -q "gradle-$GRADLE-bin.zip" gradle/wrapper/gradle-wrapper.properties
+          grep -q "compileSdk = $SDK\$" trace/build.gradle.kts
+          git diff
+      - uses: actions/setup-java@v6
+        with:
+          distribution: temurin
+          # 17 for the jvmToolchain(17) the library compiles with; the newest LTS, listed last, runs Gradle.
+          java-version: |
+            17
+            ${{ steps.v.outputs.jdk }}
+      - uses: gradle/actions/setup-gradle@v4
+      - name: Build and test
+        run: ./gradlew :trace:assembleRelease :trace:testDebugUnitTest --no-daemon -Porg.gradle.java.installations.fromEnv=JAVA_HOME_17_X64
+      - name: Keep the reports when a test fails
+        if: failure()
+        uses: actions/upload-artifact@v7
+        with:
+          name: newest-toolchain-reports
+          path: trace/build/reports/
+
+  record:
+    needs: newest
+    if: ${{ !cancelled() }}
+    permissions:
+      issues: write
+      actions: write
+    uses: use-trace/trace/.github/workflows/incident-record.yml@main
+    with:
+      title: Test incident from the newest toolchain workflow, ignore
+      outcome: ${{ needs.newest.result }}
+      body: The weekly newest toolchain run failed. It builds the SDK and runs its unit tests on the newest stable Android Gradle plugin, Kotlin, Gradle, compileSdk and LTS JDK, so a customer on the newest Android Studio may hit the same break.
+    secrets: inherit

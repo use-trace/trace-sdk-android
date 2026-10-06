@@ -282,7 +282,6 @@ public object Trace {
                 installReferrer = awaitReferrer(context, fetchReferrer),
             ),
         )
-        ConsentGate.firstOpenFlag(context).writeText("launch")
         // No flag here. The gate writes it when the first open is sent, so a launch that ends before an answer
         // writes nothing and the next launch reports the install instead.
     }

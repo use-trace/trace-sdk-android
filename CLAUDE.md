@@ -13,7 +13,8 @@ this repository, not a replacement for it.
   commas, colons or full stops.
 - Direct, plain copy. No marketing language.
 - A bug fix ships with a failing test first.
-- Never push to `main`. Branch, commit, open a pull request.
+- Never push to `main`. Branch, commit, open a pull request. A green pull request merges itself
+  (`.github/workflows/auto-merge.yml`); the `hold` label keeps it back.
 
 ## The boundary, which is not negotiable
 

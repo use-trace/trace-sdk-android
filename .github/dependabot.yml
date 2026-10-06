@@ -1,0 +1,11 @@
+# Weekly dependency updates. Each pull request goes through the same checks as any other before it can merge.
+version: 2
+updates:
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: weekly
+  - package-ecosystem: gradle
+    directory: /
+    schedule:
+      interval: weekly

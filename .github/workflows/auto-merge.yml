@@ -1,0 +1,32 @@
+name: Auto merge
+
+# Every non draft pull request is set to merge itself (squash) as soon as the required checks pass.
+# The repo setting "Allow auto-merge" only permits this; this workflow is what arms each pull request.
+# Add the "hold" label to keep a pull request back; removing the label puts it back.
+
+on:
+  pull_request:
+    types: [opened, ready_for_review, reopened, labeled, unlabeled]
+
+permissions:
+  contents: write
+  pull-requests: write
+
+jobs:
+  set:
+    if: github.event.pull_request.draft == false && github.event.pull_request.head.repo.full_name == github.repository
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    env:
+      GH_TOKEN: ${{ secrets.AGENT_GITHUB_TOKEN || github.token }}
+      PR: ${{ github.event.pull_request.number }}
+      HOLD: ${{ contains(github.event.pull_request.labels.*.name, 'hold') }}
+    steps:
+      - run: |
+          if [ "$HOLD" = "true" ]; then
+            gh pr merge "$PR" --repo "$GITHUB_REPOSITORY" --disable-auto 2>/dev/null || true
+            echo "PR $PR is on hold; auto merge off."
+          else
+            gh pr merge "$PR" --repo "$GITHUB_REPOSITORY" --auto --squash
+            echo "PR $PR merges itself when the checks pass."
+          fi

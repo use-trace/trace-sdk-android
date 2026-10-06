@@ -1,0 +1,170 @@
+package io.usetrace.sdk
+
+import android.os.Build
+import java.io.IOException
+import java.net.HttpURLConnection
+import java.net.URL
+
+/**
+ * What the consent gate sends through, and the only part of the transport anything else in the SDK may depend on.
+ *
+ * It exists so a test can stand in for the network without copying the real class's shape: a hand written double
+ * drifts from [Transport] the moment [Transport] changes, and a drifting double is a test that passes while the
+ * thing it stands for is broken. Internal, like everything else here: a customer gets no transport API and cannot
+ * replace the network layer.
+ */
+internal interface EventSender {
+
+    /** Sends one event, returning whether the server took it. Never throws. */
+    fun send(event: Event): Boolean
+
+    /**
+     * Sends the consent answers under [key], returning whether the server took them. Never throws.
+     *
+     * [key] is not optional: see [Transport.sendConsent] for what the server does without it.
+     */
+    fun sendConsent(key: String, analytics: Boolean, marketing: Boolean): Boolean
+}
+
+/**
+ * The only thing in this SDK that touches the network. `HttpURLConnection` and nothing else: a customer's app does
+ * not gain okhttp because it gained Trace.
+ *
+ * **Neither method throws, ever.** They return false. A refused connection, a host that does not resolve, a server
+ * that never answers, a typo in the configured api url: all of them are a false and a log line. This runs on the
+ * ingest path of somebody else's app, where an exception is a crash the customer did not write and cannot fix.
+ *
+ * It does not know about consent and it does not queue. It sends what it is given, once, and says whether the
+ * server took it. Holding an event until consent is known is the consent gate's job, and deciding what to do with a
+ * false is the caller's.
+ *
+ * It is synchronous. Every call must be made on a background thread, which the public API owns.
+ */
+internal class Transport(
+    private val apiKey: String,
+    apiUrl: String,
+    /** Connect and read timeout. Ten seconds in a real app; the tests use a short one deliberately. */
+    private val timeoutMillis: Int = 10_000,
+) : EventSender {
+
+    private val baseUrl: String = apiUrl.trimEnd('/')
+
+    /**
+     * Sends one event to `POST /v1/event` and returns whether the server took it.
+     *
+     * True means a 2xx. False means the server refused it or could not be reached, and the caller still holds the
+     * only copy: nothing here retries a 4xx, because a payload the server rejected it will reject again.
+     */
+    override fun send(event: Event): Boolean {
+        val accepted = post("/v1/event", event.toJson())
+        TraceLog.log("${event.type} ${if (accepted) "accepted" else "not accepted"}")
+        return accepted
+    }
+
+    /**
+     * Sends the consent answers to `POST /v1/consent` and returns whether the server took them.
+     *
+     * **[key] is not optional and there is no overload without it.** On a consent gated site the server buffers the
+     * first open and replays it once consent arrives, taking the anonymous key from this call. A consent call
+     * without one makes the server mint a key of its own and record it as though it were the app's install id,
+     * which is a false provenance rather than a missing field.
+     */
+    override fun sendConsent(key: String, analytics: Boolean, marketing: Boolean): Boolean {
+        val body = Json.obj(
+            "consent_analytics" to analytics,
+            "consent_marketing" to marketing,
+            "anon_user_key" to key,
+            "timestamp" to Event.nowIso8601(),
+        )
+        val accepted = post("/v1/consent", body)
+        TraceLog.log("consent ${if (accepted) "accepted" else "not accepted"}")
+        return accepted
+    }
+
+    private fun post(path: String, body: String): Boolean {
+        // Built once, outside the retry loop: a url the SDK cannot parse will not parse on a second attempt either.
+        val url = runCatching { URL(baseUrl + path) }.getOrNull()
+        if (url == null) {
+            TraceLog.log("cannot send $path: the configured api url is not a url")
+            return false
+        }
+
+        var attempt = 1
+        while (true) {
+            val outcome = attempt(url, body)
+            if (outcome.accepted) return true
+            if (!outcome.worthRetrying || attempt == ATTEMPTS) {
+                TraceLog.log("$path failed on attempt $attempt of $ATTEMPTS, ${outcome.reason}, giving up")
+                return false
+            }
+            TraceLog.log("$path attempt $attempt of $ATTEMPTS failed, ${outcome.reason}, trying again")
+            // A short backoff, because the caller may be holding the one copy of an install that cannot be sent
+            // again, and a long one on a background thread outlives the launch it belongs to.
+            if (!sleep(BACKOFF_MILLIS * attempt)) return false
+            attempt++
+        }
+    }
+
+    private class Outcome(val accepted: Boolean, val worthRetrying: Boolean, val reason: String)
+
+    private fun attempt(url: URL, body: String): Outcome {
+        var connection: HttpURLConnection? = null
+        return try {
+            connection = (url.openConnection() as HttpURLConnection).apply {
+                requestMethod = "POST"
+                connectTimeout = timeoutMillis
+                readTimeout = timeoutMillis
+                doOutput = true
+                setRequestProperty("Content-Type", "application/json")
+                setRequestProperty("x-trace-api-key", apiKey)
+                // Never empty. The server's bot guard reads an empty user agent as a bot and then ignores the
+                // event behind a 200, so sending none is the one failure the SDK cannot see from here.
+                setRequestProperty("User-Agent", userAgent)
+            }
+            connection.outputStream.use { it.write(body.toByteArray(Charsets.UTF_8)) }
+
+            val status = connection.responseCode
+            // Drained so the socket can be reused rather than left to a finaliser.
+            runCatching { (if (status in 200..299) connection.inputStream else connection.errorStream)?.close() }
+
+            when {
+                status in 200..299 -> Outcome(accepted = true, worthRetrying = false, reason = "accepted")
+                // A 4xx is the server saying the payload is wrong, and it will say the same thing again. Retrying
+                // is noise that reads as a flaky network and spends somebody else's data allowance three times.
+                status in 400..499 -> Outcome(accepted = false, worthRetrying = false, reason = "refused with $status")
+                else -> Outcome(accepted = false, worthRetrying = true, reason = "server answered $status")
+            }
+        } catch (networkFailure: IOException) {
+            // No connection, no answer, or an answer too late. Worth another try: the next one may find a network.
+            Outcome(accepted = false, worthRetrying = true, reason = "the request did not complete")
+        } catch (notHttp: Exception) {
+            // A configured url that parses but is not HTTP, so openConnection hands back something else. It will
+            // not become HTTP on a second attempt.
+            Outcome(accepted = false, worthRetrying = false, reason = "the configured api url is not an http url")
+        } finally {
+            runCatching { connection?.disconnect() }
+        }
+    }
+
+    // False when the wait was interrupted, which means whatever is sending is being shut down, so stop.
+    private fun sleep(millis: Long): Boolean = try {
+        Thread.sleep(millis)
+        true
+    } catch (interrupted: InterruptedException) {
+        Thread.currentThread().interrupt()
+        false
+    }
+
+    private companion object {
+
+        private const val ATTEMPTS: Int = 3
+        private const val BACKOFF_MILLIS: Long = 250
+
+        /**
+         * `TraceSdkAndroid/<version> (Android <release>)`, and never empty: the version is compiled in and the
+         * Android release falls back to a word rather than nothing, because an empty user agent is read as a bot.
+         */
+        private val userAgent: String =
+            "TraceSdkAndroid/${BuildConfig.SDK_VERSION} (Android ${Build.VERSION.RELEASE ?: "unknown"})"
+    }
+}

@@ -17,8 +17,13 @@ this repository, not a replacement for it.
 
 ## The boundary, which is not negotiable
 
-The SDK does five things: persist an install scoped anonymous key, send `FIRST_OPEN` once with the install referrer,
-send conversions, `identify(hash)`, and hold events until the consent state is known.
+The SDK does four things: persist an install scoped anonymous key, send `FIRST_OPEN` once with the install referrer,
+send conversions, and hold events until the consent state is known.
+
+Hashed identifiers are out until a reviewed slice brings them back: Trace decided on 11 September 2026 not to match
+on a hashed email or customer id (`docs/CONSENT_REMEDIATION.md` item 11 in the `trace` repository), a hashed email is
+still personal data under UK and EU GDPR, and the customer privacy notice promises pseudonymised identifiers rather
+than names or emails.
 
 It does **not** do screen views, session tracking, automatically collected events, funnels or crash reporting.
 
@@ -48,5 +53,5 @@ the SDK gets it wrong, which is why they are here rather than in a comment somew
 
 ## Repository status
 
-Empty. There is no Gradle project yet. CI currently runs the house copy rules only; the build and test jobs join it
-with the first code, rather than sitting red from day one.
+The Gradle project exists and builds: one library module, `trace`. CI runs the house copy rules, a build job and a
+unit test job. The SDK's own classes are not written yet; the plan in `docs/` says which task owns each file.

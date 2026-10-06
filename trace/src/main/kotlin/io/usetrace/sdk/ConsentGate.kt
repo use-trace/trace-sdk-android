@@ -89,7 +89,7 @@ internal class ConsentGate(
         state = if (analytics) ConsentState.GRANTED else ConsentState.DENIED
 
         // get on a grant, peek on a refusal: a refusal reports an identity that exists and never creates one.
-        val key = if (analytics) InstallId.get(appContext) else InstallId.get(appContext)
+        val key = if (analytics) InstallId.get(appContext) else InstallId.peek(appContext)
         if (key == null) {
             TraceLog.log("consent refused before this install had an identity, so there is nothing to withdraw")
         } else {

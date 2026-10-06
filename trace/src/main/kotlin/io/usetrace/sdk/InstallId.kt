@@ -27,6 +27,9 @@ import java.util.UUID
  *
  * The id is a visitor identity, so it is never logged, and this object never logs.
  *
+ * It is minted and written only by a consent grant: [get] is called by the consent gate when the person agrees and
+ * never before, so nothing is written to the device before consent. A refusal reads it with [peek] and never mints.
+ *
  * It is internal on purpose. When an id is minted is the SDK's decision, made alongside the consent gate, and a host
  * app that could call [get] would mint one outside it. A host app reads the id through [Trace.installId], which
  * never mints one. The `api` check fails if this object becomes public again.

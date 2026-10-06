@@ -51,6 +51,11 @@ the SDK gets it wrong, which is why they are here rather than in a comment somew
 - No advertising identifiers. No IDFA, no GAID, no device fingerprint, ever, however convenient.
 - A visitor identity must never appear in a log line or an error report.
 - Hold events until consent is known. Do not send and apologise later.
+- **Nothing is written to the device before consent** (decided 6 October 2026, before the first release). Before an
+  answer the first open and every conversion are held in memory only and no install id exists. A grant writes
+  `install_id` and, once the first open has been sent, `first_open_sent`. A refusal writes nothing. The consent
+  answer is not stored at all: the host app keeps it and passes it on every launch. A process killed before an
+  answer loses what was held, and the next launch records a first open again; that cost was accepted.
 
 ## Repository status
 

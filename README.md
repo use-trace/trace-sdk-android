@@ -111,8 +111,8 @@ fun onBannerAnswered(analytics: Boolean, marketing: Boolean) {
 
 Granting writes the install id, sends the consent record and then everything held, oldest first. Refusing throws
 away everything held and writes nothing. If an earlier grant left an install id, refusing also sends the consent
-record, which is what withdraws that grant and purges what it allowed; with no install id there is nothing to
-withdraw and nothing is sent. Someone who refuses and later agrees is tracked from the moment they agreed.
+record, which withdraws that grant; with no install id there is nothing to withdraw and nothing is sent. What the
+grant already sent stays with Trace until it is erased (see "What to declare to the stores"). Someone who refuses and later agrees is tracked from the moment they agreed.
 
 **Call `setConsent` on every launch, from the answer your app stored.** The SDK does not keep the answer: the
 consent record belongs to your app, which has to display it, change it and withdraw it, and two copies of it would
@@ -171,6 +171,75 @@ get it.
 It is `null` until the person has granted consent, because no identifier exists before then, which is the truthful
 answer rather than minting an identifier in order to display one. Reading it creates nothing and sends nothing. It
 is a visitor identity: show it to the person it belongs to and do not log it or send it anywhere else.
+
+## What to declare to the stores
+
+This is what the SDK itself collects, for whoever fills in the Data safety form in the Play Console. **Your own app,
+and every other SDK in it, may collect more.** Declare that as well: the answers below are the part this SDK adds,
+not the whole of your app's form. They follow Google's definitions as read on 6 October 2026, in
+[Provide information for Google Play's Data safety section](https://support.google.com/googleplay/android-developer/answer/10787469).
+
+### What leaves the device
+
+Nothing, until your app calls `setConsent(analytics = true)` (`ConsentGate.kt`). After that:
+
+| Sent | Where it comes from |
+| --- | --- |
+| The install id, a random value minted on the grant | `InstallId.kt` |
+| What happened: a first open, a purchase or another conversion, and when | `Event.kt`, `Trace.kt` |
+| The Play Store install referrer, with the first open only: the campaign text the Play Store recorded for the install | `InstallReferrer.kt`, `Trace.kt` |
+| The consent answers, with the install id, and the consent state of each event | `Transport.kt`, `ConsentGate.kt` |
+| Your app's version, and that this is an Android app from Google Play | `Trace.kt`, `Event.kt` |
+| A conversion's name, value, currency and metadata, as your app passes them | `Trace.kt` |
+| The SDK's version and the Android version, in the user agent | `Transport.kt` |
+
+The install referrer is read from the Play Store on the device at the first launch and held in memory with the
+first open; it leaves the device only with that first open, after a grant. It can carry an ad click id, which Trace
+removes before it stores the install.
+
+Like any request, it reaches Trace from the device's IP address. Trace uses that to apply rate limits and the
+site's excluded IP list, and does not store it.
+
+The SDK sends no advertising identifier, no Android ID or other hardware identifier, no name, email address or
+account id, no location, no contacts, no device model and no list of installed apps. It declares no permissions.
+
+### Answers in the Data safety form
+
+**Does your app collect or share any of the required user data types?** Yes.
+
+**Is all of the user data collected by your app encrypted in transit?** Yes, as long as `apiUrl` is an `https`
+address, which the default `https://app.usetrace.io` is (`TraceConfig.kt`). A self hosted `http` address would not
+be, and Android blocks one by default for apps targeting Android 9 or later.
+
+**Do you provide a way for users to request that their data is deleted?** Trace deletes everything it holds for
+one install when you ask it to: in Trace, the site's settings, Erase a visitor, with the install id as the visitor
+id. The person finds their install id on your privacy screen (`Trace.installId`, see above). So answer Yes if you
+accept deletion requests and pass them on. A refusal after a grant sends the consent record to Trace, which stops
+anything more being sent, but does not by itself delete what was already sent.
+
+| Data type | What the SDK sends | Collected | Shared | Purposes |
+| --- | --- | --- | --- | --- |
+| Device or other IDs | The install id | Yes | No | Analytics, Advertising or marketing |
+| App activity: App interactions | The first open with its install referrer, and each conversion with its name and metadata | Yes | No | Analytics, Advertising or marketing |
+| Financial info: Purchase history | A conversion's value and currency, and a conversion named `purchase` | Yes | No | Analytics, Advertising or marketing |
+
+Leave out Purchase history only if your app never passes a value and never records `purchase`.
+
+**Not shared.** Trace processes the data on your behalf, as your service provider, and Google does not count a
+transfer to a service provider as sharing. Trace does not sell it or pass it to anyone for their own use.
+
+**Not processed ephemerally.** Trace keeps it, to report on it.
+
+**Required or optional.** Google lets you say optional only if every user, in every region, can choose. The SDK
+sends nothing until your app calls `setConsent(analytics = true)`, so if your app asks every user and passes their
+answer, answer optional. If your app grants on a user's behalf anywhere, answer required.
+
+**Purposes.** Analytics, because Trace reports how people came to install and convert. Advertising or marketing,
+because Google's definition of it includes measuring ad performance, and attributing an install to the campaign that
+produced it is that. Trace does not use the data to show ads, target them or send marketing.
+
+Anything your app puts in a conversion's metadata is collected too. Put nothing identifying in it; if you do, it has
+to be declared as well.
 
 ## Known limits
 

@@ -98,7 +98,7 @@ internal class ConsentGate(
 
         if (key != null && analytics) {
             TraceLog.log("consent granted, sending ${held.size} held event(s)")
-            held.forEach { send(it, key) }
+            held.filter { it.type == EventType.FIRST_OPEN }.forEach { send(it, key) }
         } else {
             TraceLog.log("consent refused, discarding ${held.size} held event(s)")
         }
@@ -107,7 +107,7 @@ internal class ConsentGate(
 
     // Stamped with the key and GRANTED here, because neither was known when the event was recorded.
     private fun send(event: Event, key: String) {
-        sender.send(event.copy(consentStatus = ConsentState.GRANTED))
+        sender.send(event.copy(anonUserKey = key, consentStatus = ConsentState.GRANTED))
         if (event.type == EventType.FIRST_OPEN) recordFirstOpenSent(appContext)
     }
 

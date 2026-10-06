@@ -74,10 +74,10 @@ class TraceLogTest {
     }
 
     @Test
-    fun `an email cannot be logged, because identify refuses one and has to say so`() {
+    fun `an email cannot be logged, whatever line carries it`() {
         capture()
 
-        TraceLog.log("identify refused: someone@example.com is not a hash")
+        TraceLog.log("a value was refused: someone@example.com")
 
         assertTrue(TraceLog.REDACTED in lines.single())
         assertFalse("an email address reached the log", "example.com" in lines.single())
@@ -114,7 +114,7 @@ class TraceLogTest {
         TraceLog.redirect { lines.add(it) }
         TraceLog.debugLogging = false
 
-        TraceLog.warn("identify refused someone@example.com")
+        TraceLog.warn("a misuse mentioning someone@example.com")
 
         // Louder is not laxer. A line that skips the debug flag must not skip the sink that strips an identity.
         assertTrue(TraceLog.REDACTED in lines.single())

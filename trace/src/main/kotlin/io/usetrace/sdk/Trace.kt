@@ -9,7 +9,7 @@ import java.util.concurrent.TimeUnit
 import java.util.concurrent.atomic.AtomicReference
 
 /**
- * Trace for Android. This is the whole public surface: five members, and nothing a customer has to call in order.
+ * Trace for Android. This is the whole public surface: four members, and nothing a customer has to call in order.
  *
  * ```kotlin
  * class App : Application() {
@@ -22,11 +22,11 @@ import java.util.concurrent.atomic.AtomicReference
  * }
  * ```
  *
- * **It does five things.** It persists an install scoped anonymous key, sends `FIRST_OPEN` once with the Play Store
- * install referrer, sends conversions, carries a hashed identifier through [identify], and holds everything until
- * the host app says what the person answered. It does not do screen views, session tracking, automatically
- * collected events, funnels or crash reporting, and it never will: those are capabilities that have to be kept
- * working across every future Android release, and this SDK is deliberately not that.
+ * **It does four things.** It persists an install scoped anonymous key, sends `FIRST_OPEN` once with the Play Store
+ * install referrer, sends conversions, and holds everything until the host app says what the person answered. It
+ * does not do screen views, session tracking, automatically collected events, funnels or crash reporting, and it
+ * never will: those are capabilities that have to be kept working across every future Android release, and this
+ * SDK is deliberately not that.
  *
  * **It collects no advertising identifier and does no device fingerprinting.** Not the GAID, not a hardware id, not
  * a signature derived from the device. The install id is a random value with nothing of the device in it, so two
@@ -68,9 +68,6 @@ public object Trace {
 
     /** The one conversion name the server has a type of its own for. Matched without regard to case. */
     private const val PURCHASE_NAME: String = "purchase"
-
-    /** The event name [identify] sends under. One place, because the server side matches on the string. */
-    private const val IDENTIFY_NAME: String = "identify"
 
     /** What the server keeps a metadata key for. It drops the rest without saying so, so the SDK says so. */
     private val metadataKey: Regex = Regex("^[A-Za-z0-9_]{1,64}$")
@@ -203,54 +200,6 @@ public object Trace {
                     eventName = conversionName,
                     value = value,
                     metadata = fields,
-                ),
-            )
-        }
-    }
-
-    /**
-     * Passes on the app's own hashed identifier for the person, so that a later slice can join this install to the
-     * same person's visits on the web.
-     *
-     * **It must be a hash, and a value containing `@` is refused.** The server never matches on an email address,
-     * so sending one achieves nothing and leaves an address in a database that did not need it. Hash it in the app,
-     * with whatever the web side of the same site hashes with, or do not call this at all. A blank value is
-     * refused too.
-     *
-     * What it sends today is a custom event named `identify` carrying the hash in its metadata. **Nothing joins it
-     * to a web journey yet**: the identity bridge is a later slice, and until then this records the hash against
-     * the install and no more. It is held, dropped or sent according to consent like any other event.
-     *
-     * It returns immediately and does no network work on the calling thread. Before [initialise] it does nothing.
-     */
-    @JvmStatic
-    public fun identify(hashedIdentifier: String) {
-        val gate = gate ?: return TraceLog.warn(
-            "Trace.identify was called before Trace.initialise, so nothing was sent",
-        )
-        val context = appContext ?: return
-        val hash = hashedIdentifier.trim()
-        if (hash.isEmpty()) return TraceLog.log("Trace.identify needs a hashed identifier, so nothing was sent")
-        // The value itself is never in this line. The log would redact it, and a line that needed redacting is a
-        // line that should not have been written.
-        if (hash.contains('@')) {
-            return TraceLog.log(
-                "Trace.identify was given a value with an at sign in it, which is an address and not a hash, " +
-                    "so nothing was sent",
-            )
-        }
-
-        val at = Event.nowIso8601()
-        submit {
-            gate.record(
-                Event(
-                    type = EventType.CUSTOM,
-                    anonUserKey = InstallId.get(context),
-                    consentStatus = gate.state,
-                    timestamp = at,
-                    appVersion = appVersion(context),
-                    eventName = IDENTIFY_NAME,
-                    metadata = mapOf("hashed_identifier" to hash),
                 ),
             )
         }

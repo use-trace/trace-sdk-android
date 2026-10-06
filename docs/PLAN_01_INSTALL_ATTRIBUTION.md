@@ -309,3 +309,20 @@ object Trace {
 - An install referrer the Play Store will not supply makes the install direct, not an error.
 - The install id is held in `getNoBackupFilesDir()`, so it is never backed up, transferred or restored, and a host
   app's own backup configuration cannot change that.
+
+## Decision, 6 October 2026: `identify` removed before first merge
+
+`identify(hashedIdentifier)` was built under Task 6 and removed before the SDK was first merged. The plan above is
+left as it was written; this records what changed.
+
+It sent a hashed account identifier, and the README example hashed an email. On 11 September 2026 Trace decided not
+to match on a hashed email or customer id (`docs/CONSENT_REMEDIATION.md` item 11 in the `trace` repository): ingest
+stopped reading them, the server SDKs stopped sending them, and the customer privacy notice says Trace uses
+pseudonymised identifiers rather than names or emails. A hashed email is still personal data under UK and EU GDPR,
+so shipping this method would have contradicted what customers have already told their visitors.
+
+It was removed outright rather than left as a method that does nothing, because a customer calling it would
+reasonably assume it works. The SDK now does four things: persist an install id, send `FIRST_OPEN` once with the
+referrer, send conversions, and hold events until consent is known. A hashed identifier comes back only as its own
+reviewed slice, with the privacy notice changed to say so in the same release. The logger still redacts anything
+shaped like an email address, because an email must never reach a log whatever produced it.

@@ -166,8 +166,6 @@ class FirstOpenEndToEndTest {
         val api = StubApi().also { this.api = it }
 
         launch(api)
-        Trace.identify("a3f1c90b2d4e5f60718293a4b5c6d7e8")
-        Trace.awaitIdle()
 
         // The only path where the gate and the transport both run for real, so the only one where a line written by
         // one of them about a value handled by the other can slip through. The sink strips an identity, so a

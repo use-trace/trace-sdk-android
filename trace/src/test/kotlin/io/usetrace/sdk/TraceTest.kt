@@ -209,11 +209,10 @@ class TraceTest {
         // No initialise at all. An SDK that throws here crashes an app on a code path the customer cannot see.
         Trace.setConsent(analytics = true)
         Trace.conversion("purchase", value = 10.0)
-        Trace.identify("0123456789abcdef0123456789abcdef")
 
         assertNull(Trace.installId)
         assertNull("nothing may be persisted before initialise either", InstallId.peek(context))
-        assertEquals(3, lines.count { "before Trace.initialise" in it })
+        assertEquals(2, lines.count { "before Trace.initialise" in it })
     }
 
     @Test
@@ -295,54 +294,6 @@ class TraceTest {
     }
 
     @Test
-    fun `identify refuses a value containing an at sign and sends nothing`() {
-        val sender = RecordingSender()
-        initialise(sender)
-        Trace.setConsent(analytics = true)
-        Trace.awaitIdle()
-        sender.events.clear()
-
-        Trace.identify("someone@example.com")
-        Trace.awaitIdle()
-
-        // The server never matches on an email, so sending one achieves nothing and leaves an address in a
-        // database that did not need it. Refusing is the whole of the behaviour.
-        assertEquals(emptyList<Event>(), sender.events)
-        assertTrue(lines.any { "identify" in it && "hash" in it })
-    }
-
-    @Test
-    fun `identify sends the hash it was given`() {
-        val sender = RecordingSender()
-        val hash = "a3f1c90b2d4e5f60718293a4b5c6d7e8"
-        initialise(sender)
-        Trace.setConsent(analytics = true)
-        Trace.awaitIdle()
-        sender.events.clear()
-
-        Trace.identify(hash)
-        Trace.awaitIdle()
-
-        val event = sender.events.single()
-        assertEquals("identify", event.eventName)
-        assertEquals(hash, event.metadata["hashed_identifier"])
-    }
-
-    @Test
-    fun `identify refuses a blank value`() {
-        val sender = RecordingSender()
-        initialise(sender)
-        Trace.setConsent(analytics = true)
-        Trace.awaitIdle()
-        sender.events.clear()
-
-        Trace.identify("")
-        Trace.awaitIdle()
-
-        assertEquals(emptyList<Event>(), sender.events)
-    }
-
-    @Test
     fun `installId is null before initialise and the id afterwards`() {
         assertNull("a privacy screen must be able to say there is no id yet, truthfully", Trace.installId)
 
@@ -362,7 +313,6 @@ class TraceTest {
         initialise(sender)
         Trace.setConsent(analytics = true)
         Trace.conversion("purchase", value = 1.0)
-        Trace.identify("a3f1c90b2d4e5f60718293a4b5c6d7e8")
         Trace.awaitIdle()
 
         // An SDK that sends on the caller's thread puts a ten second socket timeout on whatever called it, which
@@ -377,13 +327,12 @@ class TraceTest {
         initialise(sender, referrer = raw)
         Trace.setConsent(analytics = true)
         Trace.conversion("purchase", value = 30.0, currency = "GBP")
-        Trace.identify("a3f1c90b2d4e5f60718293a4b5c6d7e8")
         Trace.awaitIdle()
 
         assertTrue("the launch should have said something", lines.isNotEmpty())
         lines.forEach { line ->
-            // The log redacts at the sink, so a redaction means a line tried to carry an install id, a referrer or
-            // a hashed identifier. This path handles all three, which makes it the easiest place to leak one.
+            // The log redacts at the sink, so a redaction means a line tried to carry an install id or a referrer.
+            // This path handles both, which makes it the easiest place to leak one.
             assertFalse("a line had to be redacted, so something tried to log an identity: $line", TraceLog.REDACTED in line)
         }
     }

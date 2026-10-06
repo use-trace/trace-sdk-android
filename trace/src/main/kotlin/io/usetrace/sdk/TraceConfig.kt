@@ -27,9 +27,9 @@ public class TraceConfig @JvmOverloads constructor(
      * Whether the SDK writes what it is doing to logcat under the tag `Trace`. Off by default, because a library
      * that writes to someone else's logcat uninvited is a nuisance.
      *
-     * It never writes an install id, a referrer, a hashed identifier or an event's contents, whatever this is set
-     * to: those are stripped where the line is written, not where it is called. Turning this on is safe in a
-     * release build, though there is no reason to.
+     * It never writes an install id, a referrer or an event's contents, whatever this is set to: those are
+     * stripped where the line is written, not where it is called. Turning this on is safe in a release build,
+     * though there is no reason to.
      */
     public val debugLogging: Boolean = false,
 ) {

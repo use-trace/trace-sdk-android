@@ -80,7 +80,7 @@ internal object TraceLog {
     //  - auk_... the anonymous key family, which is what an install id is
     //  - a long run of hex, which is a bare install id without its prefix, or a hashed identifier
     //  - a token carrying a tracking parameter, which is what a Play Store referrer is
-    //  - a token shaped like an email address, which identify refuses and therefore has to mention
+    //  - a token shaped like an email address, which must never reach a log whatever line carries it
     // The SDK's own lines are an event type, an outcome, a status code and a count, so none of them matches.
     private val identityShaped: Regex = Regex(
         "auk_[A-Za-z0-9_-]+" +

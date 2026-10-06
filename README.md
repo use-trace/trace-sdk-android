@@ -2,13 +2,12 @@
 
 Install attribution and conversions for Android apps, for [Trace](https://usetrace.io).
 
-The SDK is deliberately small. It does five things and nothing else:
+The SDK is deliberately small. It does four things and nothing else:
 
 1. Persists an install scoped anonymous key.
 2. Sends `FIRST_OPEN` once, with the Play Store install referrer.
 3. Sends conversions.
-4. `identify(hash)`, for a customer passing their own hashed account identifier.
-5. Holds events until the consent state is known, then flushes or discards them.
+4. Holds events until the consent state is known, then flushes or discards them.
 
 It does not do screen views, session tracking, automatically collected events, funnels or crash reporting. Every
 capability it gains has to be maintained across Android releases forever, so adding one is a product decision.
@@ -18,6 +17,11 @@ capability it gains has to be maintained across Android releases forever, so add
 value with nothing of the device in it, so two installs of your app on one phone are two unrelated installs as far
 as Trace is concerned. That sentence is published in the Trace privacy notice, so it is a promise the SDK keeps
 rather than a position it takes.
+
+**It takes and sends no hashed email and no other personal identifier.** There is no method for passing an email
+address, a hash of one, a customer id or an account id, and the SDK never collects one itself. Trace does not match
+on hashed emails or customer ids, and its privacy notice says it uses pseudonymised identifiers rather than names or
+emails, so that too is a promise the SDK keeps.
 
 ## What you need
 
@@ -84,9 +88,8 @@ says so in logcat: the install happened once.
 | `apiUrl` | `https://app.usetrace.io` | Where to send. Change it only for a self hosted deployment. |
 | `debugLogging` | `false` | Whether the SDK writes what it is doing to logcat under the tag `Trace`. |
 
-`debugLogging` never writes an install id, a referrer, a hashed identifier or an event's contents, whatever it is
-set to: those are stripped where the line is written. It is safe to turn on in a release build, though there is
-little reason to.
+`debugLogging` never writes an install id, a referrer or an event's contents, whatever it is set to: those are
+stripped where the line is written. It is safe to turn on in a release build, though there is little reason to.
 
 ## Consent
 
@@ -141,16 +144,6 @@ letting them go missing quietly. Do not put anything identifying in it.
 A conversion recorded before `setConsent` is held with the rest. A conversion recorded before `initialise` does
 nothing and logs a line saying so, rather than throwing.
 
-## Passing a hashed identifier
-
-```kotlin
-Trace.identify(sha256(account.email.lowercase().trim()))
-```
-
-It must be a hash. A value containing `@` is refused with a line in logcat and nothing is sent, because Trace never
-matches on an email address, so sending one achieves nothing and leaves an address in a database that did not need
-it. Hash it with whatever the web side of the same site hashes with, or do not call this at all.
-
 ## The install id, for a privacy screen
 
 ```kotlin
@@ -193,9 +186,6 @@ These are real. They are here rather than discovered.
   as `ga4:purchase`, a `metadata.currency` that differs from the site's configured currency makes the server drop
   the value rather than convert it. So sending a currency that is not your site's can cost you a conversion value.
   If your prices are in one currency, set that currency on the site in Trace and leave this alone.
-- **`identify` sends the hash and nothing joins it to a web journey yet.** The identity bridge is a later slice.
-  Until then the hash is recorded against the install and no more, so calling `identify` today does not merge an
-  app install with the same person's visits on the web.
 
 ## Building this repository
 

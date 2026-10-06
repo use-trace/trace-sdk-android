@@ -1,0 +1,62 @@
+name: Update open pull requests
+
+# Logic only. The ruleset requires a pull request to be up to date with main before it merges,
+# and GitHub does not do that by itself on this plan. After every push to main, every open,
+# non draft pull request that is behind gets main merged in; CI runs again and auto merge
+# finishes the job. A pull request that conflicts is labelled merge-conflict, once, and the label comes off by itself once it
+# merges cleanly again (the PR loop is not stopped for it). The same happens for pull
+# requests into any other branch this runs for.
+
+on:
+  push:
+    branches: [main]
+
+concurrency:
+  group: update-branches
+  cancel-in-progress: false
+
+permissions:
+  contents: write
+  pull-requests: write
+  issues: write
+
+jobs:
+  update:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    env:
+      # A person's token, so the update commit starts CI on the pull request.
+      GH_TOKEN: ${{ secrets.AGENT_GITHUB_TOKEN || github.token }}
+    steps:
+      - run: |
+          # GitHub works out a pull request's merge state lazily after main moves, so the first
+          # answer is often UNKNOWN. Ask until every open pull request has a real answer.
+          for _ in 1 2 3 4 5 6; do
+            list=$(gh pr list --repo "$GITHUB_REPOSITORY" --base "$GITHUB_REF_NAME" --state open --json number,isDraft,mergeStateStatus,labels \
+              --jq '.[] | select(.isDraft == false) | select([.labels[].name] | index("hold") | not) | "\(.number) \(.mergeStateStatus) \([.labels[].name] | index("merge-conflict") != null)"')
+            echo "$list" | grep -q UNKNOWN || break
+            sleep 15
+          done
+          echo "$list" | while read -r pr state conflict; do
+              [ -n "$pr" ] || continue
+              if [ "$state" = "DIRTY" ]; then
+                [ "$conflict" = "true" ] && continue
+                gh label create merge-conflict --repo "$GITHUB_REPOSITORY" --color B60205 \
+                  --description "Conflicts with its base; the branch updater cannot merge the base in" 2> /dev/null || true
+                gh pr edit "$pr" --repo "$GITHUB_REPOSITORY" --add-label merge-conflict
+                gh pr comment "$pr" --repo "$GITHUB_REPOSITORY" --body "This branch conflicts with $GITHUB_REF_NAME and cannot be updated automatically. Merge $GITHUB_REF_NAME in by hand, or ask Claude to. The merge-conflict label comes off by itself once it merges cleanly."
+                echo "PR $pr conflicts; labelled merge-conflict"
+                continue
+              fi
+              if [ "$conflict" = "true" ]; then
+                gh pr edit "$pr" --repo "$GITHUB_REPOSITORY" --remove-label merge-conflict
+                echo "PR $pr merges cleanly again; merge-conflict removed"
+              fi
+              if [ "$state" != "BEHIND" ]; then continue; fi
+              if gh pr update-branch "$pr" --repo "$GITHUB_REPOSITORY"; then
+                echo "PR $pr: $GITHUB_REF_NAME merged in, CI runs again"
+              else
+                echo "PR $pr: update failed"
+              fi
+            done
+          echo "done"

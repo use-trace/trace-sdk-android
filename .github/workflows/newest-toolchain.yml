@@ -53,6 +53,8 @@ jobs:
           grep -qx "kotlin = \"$KOTLIN\"" gradle/libs.versions.toml
           grep -q "gradle-$GRADLE-bin.zip" gradle/wrapper/gradle-wrapper.properties
           grep -q "compileSdk = $SDK\$" trace/build.gradle.kts
+          # TEMPORARY probe, removed before merge: AGP 9 builds Kotlin itself and refuses the Kotlin Android plugin.
+          sed -i '/kotlin.android/d' build.gradle.kts trace/build.gradle.kts
           git diff
       - uses: actions/setup-java@v6
         with:

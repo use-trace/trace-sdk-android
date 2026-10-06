@@ -47,7 +47,7 @@ forbid "The library declares no permissions and no components." \
 
 # The README: one transitive dependency, the install referrer client, and nothing else. The Kotlin standard library
 # comes with the language, and org.jetbrains:annotations with the standard library.
-allowed='^(com\.android\.installreferrer:installreferrer|org\.jetbrains\.kotlin:kotlin-stdlib(-jdk7|-jdk8)?|org\.jetbrains:annotations)$'
+allowed='^(com\.android\.installreferrer:installreferrer|org\.jetbrains\.kotlin:kotlin-stdlib(-common|-jdk7|-jdk8)?|org\.jetbrains:annotations)$'
 modules=$(./gradlew -q --no-daemon :trace:dependencies --configuration releaseRuntimeClasspath \
   | grep -oE '[A-Za-z0-9._-]+:[A-Za-z0-9._-]+:[^ ]+' | cut -d: -f1,2 | sort -u)
 if ! grep -qx 'com.android.installreferrer:installreferrer' <<<"$modules"; then

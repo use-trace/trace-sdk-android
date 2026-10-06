@@ -107,7 +107,7 @@ internal class ConsentGate(
 
     // Stamped with the key and GRANTED here, because neither was known when the event was recorded.
     private fun send(event: Event, key: String) {
-        sender.send(event.copy(anonUserKey = key, consentStatus = ConsentState.GRANTED))
+        sender.send(event.copy(consentStatus = ConsentState.GRANTED))
         if (event.type == EventType.FIRST_OPEN) recordFirstOpenSent(appContext)
     }
 

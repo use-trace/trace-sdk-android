@@ -4,7 +4,8 @@ name: newest toolchain
 # LTS JDK, whatever gradle/libs.versions.toml pins (docs/plans/REPO_AUTOMATION.md in use-trace/trace, Android task 6).
 # Dependabot moves the pinned versions; this catches a break in the gap between its pull requests, and tells you before
 # a customer on the newest Android Studio does. The versions are applied to a throwaway checkout and never committed.
-# A failure opens one incident issue and alerts through the monorepo's shared recorder; a later pass closes it.
+# A failure opens one incident issue and alerts through a copy of the monorepo's shared recorder (below); a later pass
+# closes it.
 
 on:
   schedule:
@@ -70,15 +71,46 @@ jobs:
           name: newest-toolchain-reports
           path: trace/build/reports/
 
+  # The step of use-trace/trace's .github/workflows/incident-record.yml, the shared recorder, copied: this repository is
+  # public and that one private, and GitHub lets a public repository call no workflow in a private one. Keep the two in
+  # step. When the recorder moves to a public repository, call it there with `uses:` and delete this copy.
   record:
     needs: newest
     if: ${{ !cancelled() }}
+    name: record
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
     permissions:
       issues: write
-      actions: write
-    uses: use-trace/trace/.github/workflows/incident-record.yml@main
-    with:
-      title: Test incident from the newest toolchain workflow, ignore
-      outcome: ${{ needs.newest.result }}
-      body: The weekly newest toolchain run failed. It builds the SDK and runs its unit tests on the newest stable Android Gradle plugin, Kotlin, Gradle, compileSdk and LTS JDK, so a customer on the newest Android Studio may hit the same break.
-    secrets: inherit
+    steps:
+      - name: Record the outcome
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TITLE: Test incident from the newest toolchain workflow, ignore
+          OUTCOME: ${{ needs.newest.result }}
+          BODY: The weekly newest toolchain run failed. It builds the SDK and runs its unit tests on the newest stable Android Gradle plugin, Kotlin, Gradle, compileSdk and LTS JDK, so a customer on the newest Android Studio may hit the same break.
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+          WEBHOOK: ${{ secrets.TRACE_ALERT_WEBHOOK_URL }}
+        run: |
+          notify() {
+            if [ -n "$WEBHOOK" ]; then
+              curl -sS -m 10 -X POST "$WEBHOOK" -H 'Content-Type: application/json' -d "$(jq -n --arg t "$1" '{text: $t}')" > /dev/null || true
+            fi
+          }
+          open=$(gh issue list --repo "$GITHUB_REPOSITORY" --label incident --state open --search "\"$TITLE\" in:title" --json number --jq '.[0].number // empty' 2> /dev/null || true)
+          if [ "$OUTCOME" = "success" ]; then
+            if [ -n "$open" ]; then
+              gh issue close "$open" --repo "$GITHUB_REPOSITORY" --comment "Recovered: $RUN_URL"
+              notify "Recovered, closed \"$TITLE\": $RUN_URL"
+            fi
+            exit 0
+          fi
+          gh label create incident --repo "$GITHUB_REPOSITORY" --color B60205 --description "Production is failing a deploy or monitor check" 2> /dev/null || true
+          if [ -n "$open" ]; then
+            gh issue comment "$open" --repo "$GITHUB_REPOSITORY" --body "Still failing: $RUN_URL"
+          else
+            url=$(gh issue create --repo "$GITHUB_REPOSITORY" --label incident --title "$TITLE" \
+              --body "$BODY Failing run: $RUN_URL. This issue closes itself when the monitor passes again.")
+            notify "$TITLE: $url"
+          fi
+          exit 1

@@ -67,8 +67,9 @@ which task built each file.
 
 `.github/workflows/newest-toolchain.yml` builds and tests every Monday on the newest stable Android Gradle plugin,
 Kotlin, Gradle, compileSdk and LTS JDK, applied to a throwaway checkout. A failure opens one `incident` issue titled
-"Newest toolchain run is failing" and alerts, through the monorepo's shared recorder; the next pass closes it. It
-means the pinned versions are about to stop working for a customer on the newest tools, not that `main` is broken.
+"Newest toolchain run is failing" and alerts, through a copy of the monorepo's shared recorder (a public repository
+cannot call a workflow in a private one); the next pass closes it. It means the pinned versions are about to stop
+working for a customer on the newest tools, not that `main` is broken.
 
 `privacy` is `scripts/check-privacy.sh`: the rules above, as a check. The README's "What to declare to the stores"
 is what customers put in the Play Data safety form, so sending a new field changes it in the same pull request;

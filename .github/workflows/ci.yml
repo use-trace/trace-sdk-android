@@ -52,6 +52,7 @@ jobs:
           distribution: temurin
           java-version: '17'
       - uses: gradle/actions/setup-gradle@v4
+      # Each Robolectric test runs at minSdk 21 and at compileSdk 35 (robolectric.properties), so this is both levels.
       - name: Run the unit tests
         run: ./gradlew :trace:testDebugUnitTest --no-daemon
       - name: Keep the reports when a test fails
@@ -60,3 +61,59 @@ jobs:
         with:
           name: unit-test-reports
           path: trace/build/reports/tests/
+
+  lint:
+    name: lint
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+      - uses: gradle/actions/setup-gradle@v4
+      - name: Android lint on the release variant
+        run: ./gradlew :trace:lintRelease --no-daemon
+      - name: Keep the report when lint fails
+        if: failure()
+        uses: actions/upload-artifact@v7
+        with:
+          name: lint-report
+          path: trace/build/reports/lint-results-release.html
+
+  # The privacy rules in CLAUDE.md and the README, checked in code: no advertising or device identifier, no
+  # identify, logging only through TraceLog, no permissions, and nothing on the classpath but the referrer client.
+  privacy:
+    name: privacy
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+      - uses: gradle/actions/setup-gradle@v4
+      - run: scripts/check-privacy.sh
+
+  # The public API compared with trace/api/trace.api (Kotlin's binary compatibility validator), so any change to it
+  # shows in the diff and a breaking one is seen before it needs a major version.
+  api:
+    name: api
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+      - uses: gradle/actions/setup-gradle@v4
+      - name: Compare the public API with trace/api/trace.api
+        run: ./gradlew :trace:apiCheck --no-daemon
+      - name: Write the API as it now is, for a change that was meant
+        if: failure()
+        run: ./gradlew :trace:apiDump --no-daemon
+      - if: failure()
+        uses: actions/upload-artifact@v7
+        with:
+          name: api-dump
+          path: trace/api/

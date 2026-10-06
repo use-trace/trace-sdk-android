@@ -54,5 +54,10 @@ the SDK gets it wrong, which is why they are here rather than in a comment somew
 
 ## Repository status
 
-The Gradle project exists and builds: one library module, `trace`. CI runs the house copy rules, a build job and a
-unit test job. The SDK's own classes are not written yet; the plan in `docs/` says which task owns each file.
+The Gradle project exists and builds: one library module, `trace`. CI runs the house copy rules, a build job, a
+unit test job (every Robolectric test runs at minSdk 21 and at compileSdk 35), `lint`, `privacy` and `api`. The
+SDK's own classes are not written yet; the plan in `docs/` says which task owns each file.
+
+`privacy` is `scripts/check-privacy.sh`: the rules above, as a check. `api` compares the public API with
+`trace/api/trace.api`; after a deliberate change to anything public, run `./gradlew :trace:apiDump` and commit the
+file with the change.

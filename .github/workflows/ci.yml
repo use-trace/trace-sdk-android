@@ -38,7 +38,7 @@ jobs:
         with:
           distribution: temurin
           java-version: '17'
-      - uses: gradle/actions/setup-gradle@v4
+      - uses: gradle/actions/setup-gradle@v6
       - name: Assemble the library
         run: ./gradlew :trace:assembleRelease --no-daemon
 
@@ -51,7 +51,7 @@ jobs:
         with:
           distribution: temurin
           java-version: '17'
-      - uses: gradle/actions/setup-gradle@v4
+      - uses: gradle/actions/setup-gradle@v6
       # Each Robolectric test runs at minSdk 21 and at compileSdk 35 (robolectric.properties), so this is both levels.
       - name: Run the unit tests
         run: ./gradlew :trace:testDebugUnitTest --no-daemon
@@ -71,7 +71,7 @@ jobs:
         with:
           distribution: temurin
           java-version: '17'
-      - uses: gradle/actions/setup-gradle@v4
+      - uses: gradle/actions/setup-gradle@v6
       - name: Android lint on the release variant
         run: ./gradlew :trace:lintRelease --no-daemon
       - name: Keep the report when lint fails
@@ -92,7 +92,7 @@ jobs:
         with:
           distribution: temurin
           java-version: '17'
-      - uses: gradle/actions/setup-gradle@v4
+      - uses: gradle/actions/setup-gradle@v6
       - run: scripts/check-privacy.sh
 
   # The public API compared with trace/api/trace.api (Kotlin's binary compatibility validator), so any change to it
@@ -106,7 +106,7 @@ jobs:
         with:
           distribution: temurin
           java-version: '17'
-      - uses: gradle/actions/setup-gradle@v4
+      - uses: gradle/actions/setup-gradle@v6
       - name: Compare the public API with trace/api/trace.api
         run: ./gradlew :trace:apiCheck --no-daemon
       - name: Write the API as it now is, for a change that was meant

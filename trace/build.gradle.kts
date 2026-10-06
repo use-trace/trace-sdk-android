@@ -41,6 +41,8 @@ kotlin {
 
 dependencies {
     implementation(libs.installreferrer)
+    // DELIBERATE VIOLATION, reverted in the next commit: a second runtime dependency.
+    implementation("com.squareup.okhttp3:okhttp:4.12.0")
 
     testImplementation(libs.junit)
     testImplementation(libs.robolectric)

@@ -98,7 +98,7 @@ internal class ConsentGate(
 
         if (key != null && analytics) {
             TraceLog.log("consent granted, sending ${held.size} held event(s)")
-            held.filter { it.type == EventType.FIRST_OPEN }.forEach { send(it, key) }
+            held.forEach { send(it, key) }
         } else {
             TraceLog.log("consent refused, discarding ${held.size} held event(s)")
         }

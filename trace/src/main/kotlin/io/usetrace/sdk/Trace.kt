@@ -1,7 +1,6 @@
 package io.usetrace.sdk
 
 import android.content.Context
-import java.io.File
 import java.util.concurrent.CountDownLatch
 import java.util.concurrent.ExecutorService
 import java.util.concurrent.Executors
@@ -43,11 +42,16 @@ import java.util.concurrent.atomic.AtomicReference
  * before it, and the order of a journey is the point. A second thread would interleave the two or deadlock on the
  * gate, so if this ever becomes a pool, the gate has to change first.
  *
+ * **Nothing is written to the device before consent.** Before the person has answered, the first open and every
+ * conversion are held in memory only, and no install id exists. A grant writes the install id and, once the first
+ * open has been sent, the first open flag. A refusal writes nothing. An app killed before an answer loses what was
+ * held, and its next launch records a first open again, because no flag was written.
+ *
  * **A send that fails is not retried on a later launch.** The transport tries three times and then gives up, and
- * what the gate flushed is gone from disk by the time the flush returns. So an app that was offline at the moment
- * consent was granted loses what was held, including its first open. The alternative, a queue that outlives the
- * answer, is a queue some later launch sends again, and a duplicated install is harder to see than a missing one.
- * This is a known limit and it is written in the README rather than hidden here.
+ * nothing the gate flushed is kept. So an app that was offline at the moment consent was granted loses what was
+ * held, including its first open. The alternative, a queue that outlives the answer, is a queue some later launch
+ * sends again, and a duplicated install is harder to see than a missing one. This is a known limit and it is written
+ * in the README rather than hidden here.
  */
 public object Trace {
 
@@ -63,8 +67,6 @@ public object Trace {
     internal const val REFERRER_DEADLINE_MILLIS: Long = 2_500
 
     private const val THREAD_NAME: String = "trace-sdk"
-
-    private const val FIRST_OPEN_FLAG: String = "first_open_sent"
 
     /** The one conversion name the server has a type of its own for. Matched without regard to case. */
     private const val PURCHASE_NAME: String = "purchase"
@@ -96,17 +98,16 @@ public object Trace {
      * only available for a limited window after an install, so later means a worse chance of reading it. Calling it
      * a second time does nothing and says so: the install already happened.
      *
-     * It returns immediately. Reading the referrer, minting the install id and sending the first open all happen on
-     * the SDK's own thread afterwards.
+     * It returns immediately. Reading the referrer and recording the first open happen on the SDK's own thread
+     * afterwards.
      *
-     * **The first open is held until [setConsent] is called**, on disk so that an app killed with its banner still
-     * on screen does not lose it. So nothing reaches Trace until the host app has said what the person answered,
-     * and an app that never calls [setConsent] sends nothing at all, which is the correct behaviour rather than a
-     * bug.
+     * **The first open is held in memory until [setConsent] is called**, and nothing is written to the device before
+     * then. So nothing reaches Trace until the host app has said what the person answered, and an app that never
+     * calls [setConsent] sends nothing and stores nothing, which is the correct behaviour rather than a bug.
      *
      * **The install is reported once, ever.** A flag in the directory Android never backs up records that it went,
-     * written after the gate has taken the event rather than before, so a kill in between over counts rather than
-     * losing the install. A reinstall has no flag and no install id, so it mints both and counts as a new install.
+     * written when the first open is sent after a grant. A kill before an answer writes no flag, so the next launch
+     * records a first open again. A reinstall has no flag and no install id, so it counts as a new install.
      *
      * A blank api key is refused here, with a line in logcat, because nothing could be sent with it and the server
      * would answer 401 to every attempt without the SDK being able to say why.
@@ -121,8 +122,9 @@ public object Trace {
      * `analytics` is the answer that gates events. `marketing` is passed to the server for the record and does not
      * decide whether an event is sent, so marketing alone discards what was held like any other refusal.
      *
-     * Granting sends the consent call and then everything held, oldest first. Refusing sends the consent call, which
-     * is what withdraws an earlier grant and purges what it allowed, and throws away everything held. A person who
+     * Granting mints and writes the install id if there is none yet, sends the consent call and then everything held,
+     * oldest first. Refusing throws away everything held and writes nothing; when an earlier grant left an install id,
+     * it also sends the consent call, which is what withdraws that grant and purges what it allowed. A person who
      * refuses and then agrees is tracked from the moment they agreed.
      *
      * **Call this on every launch, from the answer the app itself stored.** The SDK does not persist the answer, on
@@ -193,7 +195,7 @@ public object Trace {
                     } else {
                         EventType.CUSTOM
                     },
-                    anonUserKey = InstallId.get(context),
+                    anonUserKey = "",
                     consentStatus = gate.state,
                     timestamp = at,
                     appVersion = appVersion(context),
@@ -213,7 +215,7 @@ public object Trace {
      * settings, which an app user has nowhere to look at: so the app shows it, on its own privacy screen, and the
      * only place the app can get it is here.
      *
-     * It is null before [initialise], and null afterwards until something has been recorded, which is the truthful
+     * It is null until the person has granted consent, because no id exists before then, which is the truthful
      * answer rather than minting an id in order to display one. Reading it creates nothing and sends nothing.
      *
      * It reads one small file on the calling thread, so it is cheap enough for a privacy screen to show directly.
@@ -265,8 +267,7 @@ public object Trace {
         gate: ConsentGate,
         fetchReferrer: (Context, (String?) -> Unit) -> Unit,
     ) {
-        val flag = File(context.noBackupFilesDir, FIRST_OPEN_FLAG)
-        if (runCatching { flag.exists() }.getOrDefault(false)) {
+        if (runCatching { ConsentGate.firstOpenFlag(context).exists() }.getOrDefault(false)) {
             TraceLog.log("the first open was reported on an earlier launch, so this launch reports none")
             return
         }
@@ -274,20 +275,15 @@ public object Trace {
         gate.record(
             Event(
                 type = EventType.FIRST_OPEN,
-                anonUserKey = InstallId.get(context),
+                // The gate stamps the install id when it sends the event. Before a grant there is none to stamp.
+                anonUserKey = "",
                 consentStatus = gate.state,
                 appVersion = appVersion(context),
                 installReferrer = awaitReferrer(context, fetchReferrer),
             ),
         )
-
-        // Written after the gate has taken the event, not before. The gate has either sent it or written it to
-        // disk, so from here on it is the gate's to deliver; a flag written first would suppress an install the
-        // gate never received. A process killed in between sends the install twice on the next launch, which over
-        // counts one install and is the better of the two failures: the first open carries the referrer, and a
-        // referrer cannot be read a second time.
-        val kept = runCatching { flag.writeText(Event.nowIso8601()) }.isSuccess
-        if (!kept) TraceLog.log("could not record that the install was reported, so a later launch may report it again")
+        // No flag here. The gate writes it when the first open is sent, so a launch that ends before an answer
+        // writes nothing and the next launch reports the install instead.
     }
 
     /**
@@ -375,7 +371,8 @@ public object Trace {
      * Forgets everything held in memory, which is what a process death does. For the tests: this object outlives a
      * test method, and the test that matters most is the one that initialises twice in two simulated processes.
      *
-     * It deliberately does not touch what is on disk, because that is exactly what survives a process death.
+     * It deliberately does not touch what is on disk, because that is exactly what survives a process death: the
+     * install id and the first open flag, once a grant has written them.
      */
     internal fun resetForTest() {
         awaitIdle()

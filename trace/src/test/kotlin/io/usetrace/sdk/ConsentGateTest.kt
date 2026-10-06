@@ -142,6 +142,7 @@ class ConsentGateTest {
     fun `denying consent discards the held events and sends none of them`() {
         val sender = RecordingSender()
         val gate = gate(sender)
+        InstallId.get(context) // an earlier launch's grant, so there is a grant to withdraw
 
         gate.record(event("first", EventType.FIRST_OPEN))
         gate.record(event("second"))

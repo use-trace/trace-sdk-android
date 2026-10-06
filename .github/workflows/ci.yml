@@ -6,24 +6,32 @@ on:
     branches: [main]
 
 jobs:
-  copy-rules:
-    name: copy rules
-    runs-on: ubuntu-latest
+  # House rules shared by every Trace repository (docs/plans/REPO_AUTOMATION.md in use-trace/trace).
+  house:
+    name: house
+    runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v4
       - name: No em dashes or en dashes
         run: |
-          # A house rule across every Trace repository. Checked from the first commit, because retrofitting it
-          # across a grown codebase is the expensive way to find out it was never enforced.
-          if grep -rInP '[\x{2014}\x{2013}]' --exclude-dir=.git . ; then
-            echo "Found an em dash or en dash. Use commas, colons or full stops."
+          # Byte patterns, so the check reads the same whatever the runner's locale. -I skips binary files.
+          if git grep -nIF -e $'\xe2\x80\x93' -e $'\xe2\x80\x94' -- .; then
+            echo "Found an em dash or en dash. Use commas, colons or full stops." >&2
             exit 1
           fi
           echo "Clean."
+      - name: Runners are pinned
+        run: |
+          # A moving label such as ubuntu-latest changes the machine under every job on GitHub's schedule, not ours.
+          if grep -nE '^[[:space:]]*runs-on:.*-latest' .github/workflows/*.yml; then
+            echo "Pin the runner (ubuntu-24.04 or macos-15)." >&2
+            exit 1
+          fi
+          echo "Pinned."
 
   build:
     name: build
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-java@v4
@@ -36,7 +44,7 @@ jobs:
 
   unit-tests:
     name: unit tests
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-java@v4

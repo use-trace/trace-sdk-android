@@ -72,8 +72,8 @@ class MyApplication : Application() {
 }
 ```
 
-`initialise` returns at once. Reading the referrer, minting the install id and sending the first open all happen
-afterwards on one background thread the SDK owns, so no method here does network work on the thread that called it
+`initialise` returns at once. Reading the referrer and recording the first open happen afterwards on one background
+thread the SDK owns, so no method here does network work on the thread that called it
 and none of them throws into your app.
 
 Call it in `onCreate` rather than later. The Play Store only offers the install referrer for a limited window after
@@ -93,9 +93,9 @@ stripped where the line is written. It is safe to turn on in a release build, th
 
 ## Consent
 
-**Nothing is sent until you call `setConsent`.** Until then every event, including the first open, is held on disk
-and sent to nobody. An app that never calls `setConsent` sends nothing at all, which is the correct behaviour and
-not a fault to report.
+**Nothing is sent and nothing is stored until you call `setConsent`.** Until then every event, including the first
+open, is held in memory and sent to nobody, and no install id exists. An app that never calls `setConsent` sends
+nothing and writes nothing to the device, which is the correct behaviour and not a fault to report.
 
 ```kotlin
 // Your consent interface, whatever it is, on the answer rather than on the launch.
@@ -109,14 +109,27 @@ fun onBannerAnswered(analytics: Boolean, marketing: Boolean) {
 - `marketing` is passed to Trace for the consent record and does not decide whether an event is sent, so
   `analytics = false` discards what was held whatever `marketing` says.
 
-Granting sends the consent record and then everything held, oldest first. Refusing sends the consent record, which
-is what withdraws an earlier grant and purges what it allowed, and throws away everything held. Someone who
-refuses and later agrees is tracked from the moment they agreed.
+Granting writes the install id, sends the consent record and then everything held, oldest first. Refusing throws
+away everything held and writes nothing. If an earlier grant left an install id, refusing also sends the consent
+record, which is what withdraws that grant and purges what it allowed; with no install id there is nothing to
+withdraw and nothing is sent. Someone who refuses and later agrees is tracked from the moment they agreed.
 
 **Call `setConsent` on every launch, from the answer your app stored.** The SDK does not keep the answer: the
 consent record belongs to your app, which has to display it, change it and withdraw it, and two copies of it would
 eventually disagree. An app that calls it once after its banner and never again spends every later launch holding
 events it should be sending.
+
+## What is stored on the device, and when
+
+Nothing before the person grants consent. Decided on 6 October 2026, before the first release.
+
+| When | What the SDK writes, in `Context.getNoBackupFilesDir()` |
+| --- | --- |
+| Before an answer | Nothing. The first open and any conversions are held in memory only. |
+| On a grant | `install_id`, the install id, if there is not one yet. `first_open_sent`, once the first open has been sent. |
+| On a refusal | Nothing. |
+
+The SDK does not store the consent answer. Your app does, and passes it to `setConsent` on every launch.
 
 ## Sending a conversion
 
@@ -155,7 +168,7 @@ to be deleted, has to be able to find their own identifier first, and an app use
 it from. So show it on your own privacy screen, with the Trace privacy contact, and that is the only place they can
 get it.
 
-It is `null` before `initialise`, and `null` afterwards until something has been recorded, which is the truthful
+It is `null` until the person has granted consent, because no identifier exists before then, which is the truthful
 answer rather than minting an identifier in order to display one. Reading it creates nothing and sends nothing. It
 is a visitor identity: show it to the person it belongs to and do not log it or send it anywhere else.
 
@@ -168,16 +181,19 @@ These are real. They are here rather than discovered.
   purpose twice over: an id that came back would count a reinstall as the same install, and it would quietly join
   somebody back to a journey history they may reasonably have treated as finished when they removed the app. Over
   counting reinstalls is the better failure.
-- **The backup exclusion is proved by a file assertion, not on a device.** The suite asserts the id and the held
-  queue are written under `getNoBackupFilesDir()`. Nothing here proves the platform honours that exclusion; that
+- **The backup exclusion is proved by a file assertion, not on a device.** The suite asserts the id and the first
+  open flag are written under `getNoBackupFilesDir()`. Nothing here proves the platform honours that exclusion; that
   needs a device test driving `bmgr`, which this slice does not have.
 - **A referrer the Play Store will not give is a direct install, not an error.** `FEATURE_NOT_SUPPORTED`, a Play
   Services that is absent or out of date, a sideloaded build, or a client that never answers at all: in every case
   the install is still reported, with no referrer, and lands in direct.
+- **An app killed before the person answers loses what was held.** Nothing is stored before consent, so the held
+  first open and conversions are in memory only. The next launch finds no first open flag and records a first open
+  again, with that launch's time, so the install is still reported once the person agrees.
 - **A device offline at the moment consent is granted loses what was held, including the first open.** The
-  transport tries three times and then gives up, and the held queue is cleared from disk when the flush returns.
-  Keeping the queue past the answer would mean some later launch sends it again, and a duplicated install is
-  harder to see than a missing one. There is no retry across launches.
+  transport tries three times and then gives up, and nothing that was flushed is kept. Keeping it past the answer
+  would mean some later launch sends it again, and a duplicated install is harder to see than a missing one. There
+  is no retry across launches.
 - **`setConsent` has to be called on every launch**, because the SDK does not persist the answer. See Consent
   above.
 - **`currency` on a conversion is recorded, not applied.** Trace values conversions in the currency the site is

@@ -6,17 +6,6 @@ public final class io/usetrace/sdk/BuildConfig {
 	public fun <init> ()V
 }
 
-public final class io/usetrace/sdk/InstallId {
-	public static final field INSTANCE Lio/usetrace/sdk/InstallId;
-	public static final fun get (Landroid/content/Context;)Ljava/lang/String;
-	public static final fun peek (Landroid/content/Context;)Ljava/lang/String;
-}
-
-public final class io/usetrace/sdk/InstallReferrer {
-	public static final field INSTANCE Lio/usetrace/sdk/InstallReferrer;
-	public static final fun fetch (Landroid/content/Context;Lkotlin/jvm/functions/Function1;)V
-}
-
 public final class io/usetrace/sdk/Trace {
 	public static final field INSTANCE Lio/usetrace/sdk/Trace;
 	public static final fun conversion (Ljava/lang/String;)V

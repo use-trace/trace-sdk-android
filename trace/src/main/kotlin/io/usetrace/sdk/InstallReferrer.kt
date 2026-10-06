@@ -21,7 +21,7 @@ import java.util.concurrent.atomic.AtomicBoolean
  * It does not log. The referrer carries campaign values, and a click id until the server strips it, so the string
  * is never written anywhere but the request body.
  */
-public object InstallReferrer {
+internal object InstallReferrer {
 
     /**
      * Reads this install's Play Store referrer and hands it to [onResult] exactly once, on whichever thread the
@@ -39,7 +39,7 @@ public object InstallReferrer {
      * called, so a caller must not make the first open wait on this.
      */
     @JvmStatic
-    public fun fetch(context: Context, onResult: (String?) -> Unit) {
+    internal fun fetch(context: Context, onResult: (String?) -> Unit) {
         fetch(PlayReferrerClient(context), onResult)
     }
 

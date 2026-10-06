@@ -51,12 +51,19 @@ the SDK gets it wrong, which is why they are here rather than in a comment somew
 - No advertising identifiers. No IDFA, no GAID, no device fingerprint, ever, however convenient.
 - A visitor identity must never appear in a log line or an error report.
 - Hold events until consent is known. Do not send and apologise later.
+- **Nothing is written to the device before consent** (decided 6 October 2026, before the first release). Before an
+  answer the first open and every conversion are held in memory only and no install id exists. A grant writes
+  `install_id` and, once the first open has been sent, `first_open_sent`. A refusal writes nothing. The consent
+  answer is not stored at all: the host app keeps it and passes it on every launch. A process killed before an
+  answer loses what was held, and the next launch records a first open again; that cost was accepted.
 
 ## Repository status
 
 The Gradle project exists and builds: one library module, `trace`. CI runs the house copy rules, a build job, a
 unit test job (every Robolectric test runs at minSdk 21 and at compileSdk 35), `lint`, `privacy` and `api`. The
-SDK's own classes are not written yet; the plan in `docs/` says which task owns each file.
+SDK is written: `Trace` and `TraceConfig` are its whole public surface, and every other class it declares is
+`internal` (`BuildConfig` is public because the Android Gradle plugin generates it so). The plan in `docs/` records
+which task built each file.
 
 `privacy` is `scripts/check-privacy.sh`: the rules above, as a check. `api` compares the public API with
 `trace/api/trace.api`; after a deliberate change to anything public, run `./gradlew :trace:apiDump` and commit the

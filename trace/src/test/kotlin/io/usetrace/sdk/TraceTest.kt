@@ -25,8 +25,8 @@ import java.io.File
  * called from.
  *
  * The transport and the Play referrer client are both injected, so the suite needs no network and no Play Services.
- * Robolectric, because the send once flag and the held queue are real files in a real no-backup directory, and the
- * test that matters most is the one that reads the flag back in a second process.
+ * Robolectric, because the install id and the send once flag are real files in a real no-backup directory, and the
+ * tests that matter most read that directory back: empty before an answer, and the flag in a second process.
  */
 @RunWith(RobolectricTestRunner::class)
 class TraceTest {
@@ -174,7 +174,7 @@ class TraceTest {
         Trace.setConsent(analytics = true)
         Trace.awaitIdle()
 
-        // Beside the install id and the held queue, and for a sharper reason than either: a flag restored onto a
+        // Beside the install id, and for a sharper reason: a flag restored onto a
         // fresh install would suppress that install's first open, and the install is the one event that cannot be
         // sent again. A missing flag over counts; a restored one loses the customer.
         assertTrue(File(context.noBackupFilesDir, "first_open_sent").isFile)

@@ -26,8 +26,15 @@ import java.util.UUID
  * counts as a new install.
  *
  * The id is a visitor identity, so it is never logged, and this object never logs.
+ *
+ * It is minted and written only by a consent grant: [get] is called by the consent gate when the person agrees and
+ * never before, so nothing is written to the device before consent. A refusal reads it with [peek] and never mints.
+ *
+ * It is internal on purpose. When an id is minted is the SDK's decision, made alongside the consent gate, and a host
+ * app that could call [get] would mint one outside it. A host app reads the id through [Trace.installId], which
+ * never mints one. The `api` check fails if this object becomes public again.
  */
-public object InstallId {
+internal object InstallId {
 
     private const val FILE_NAME: String = "install_id"
 
@@ -39,7 +46,7 @@ public object InstallId {
      * someone else's app; the next launch mints a fresh one.
      */
     @JvmStatic
-    public fun get(context: Context): String = synchronized(this) {
+    internal fun get(context: Context): String = synchronized(this) {
         val file = file(context)
         read(file) ?: mint().also { runCatching { file.writeText(it) } }
     }
@@ -47,12 +54,12 @@ public object InstallId {
     /**
      * Returns this install's id, or null when there is not one yet. Reading does not create one.
      *
-     * This is what a host app shows on its own privacy screen, so that a person can find the identifier Trace
-     * holds for them. Before the first [get] it answers null, truthfully, rather than minting an id in order to
-     * display it.
+     * This is what [Trace.installId] reads, so that a host app can show a person the identifier Trace holds for
+     * them on its own privacy screen. Before the first [get] it answers null, truthfully, rather than minting an id
+     * in order to display it.
      */
     @JvmStatic
-    public fun peek(context: Context): String? = read(file(context))
+    internal fun peek(context: Context): String? = read(file(context))
 
     // The application context keeps the file off whatever short lived context was handed in. It is null when the
     // SDK is called from Application.attachBaseContext or a ContentProvider that runs before the application

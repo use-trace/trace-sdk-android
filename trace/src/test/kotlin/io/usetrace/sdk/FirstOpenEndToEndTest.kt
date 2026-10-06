@@ -141,7 +141,7 @@ class FirstOpenEndToEndTest {
 
         launch(api)
 
-        // Both events were built while the state was UNKNOWN and held on disk in that form. The server treats the
+        // Both events were built while the state was UNKNOWN and held in memory in that form. The server treats the
         // payload's consent_status as authoritative and quarantines UNKNOWN on a UK or EU site, so an event
         // flushed by a grant that still said UNKNOWN would be held back after the person had already agreed. From
         // the outside that is indistinguishable from never having sent it, which is why this is asserted on the

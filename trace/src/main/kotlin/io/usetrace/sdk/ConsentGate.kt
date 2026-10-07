@@ -96,8 +96,8 @@ internal class ConsentGate(
         // get on a grant, peek on a refusal: a refusal reports an identity that exists and never creates one.
         val key = if (analytics) InstallId.get(appContext) else InstallId.peek(appContext)
         if (key != null) {
-            sender.sendConsent(key, analytics, marketing, firstAnswer = analytics)
-        } else if (true) {
+            sender.sendConsent(key, analytics, marketing, firstAnswer = minting)
+        } else if (!refusalReported && installedWithinADay()) {
             // Counted, never identified: no key, and nothing written to remember it, because nothing may be written
             // before a grant. So once a process, in the install's first day, when the banner is answered.
             // ponytail: a refuser whose process restarts in the first day is counted again, and one who first answers

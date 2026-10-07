@@ -21,8 +21,12 @@ public class TraceConfig @JvmOverloads constructor(
     /**
      * Where to send. The hosted API unless a self hosted deployment says otherwise, and a trailing slash does no
      * harm. An url this SDK cannot parse is reported once and then nothing is sent, rather than throwing.
+     *
+     * The hosted API is `/api-proxy` on the dashboard's host, as the tracking tag and the WordPress plugin use it.
+     * The bare host is the dashboard, which answers a `POST /v1/event` with a web page and a 200, so every event
+     * sent there looked delivered and was lost (`DefaultApiUrlTest`).
      */
-    public val apiUrl: String = "https://app.usetrace.io",
+    public val apiUrl: String = "https://app.usetrace.io/api-proxy",
     /**
      * Whether the SDK writes what it is doing to logcat under the tag `Trace`. Off by default, because a library
      * that writes to someone else's logcat uninvited is a nuisance.

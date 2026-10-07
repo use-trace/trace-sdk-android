@@ -47,10 +47,10 @@ class ConsentGateTest {
         val consentKeys = mutableListOf<String>()
         var accepts: Boolean = true
 
-        override fun send(event: Event): Boolean {
+        override fun send(event: Event): Delivery {
             calls.add("event ${event.type}${event.eventName?.let { " $it" } ?: ""}")
             events.add(event)
-            return accepts
+            return if (accepts) Delivery.DELIVERED else Delivery.FAILED
         }
 
         override fun sendConsent(key: String, analytics: Boolean, marketing: Boolean): Boolean {

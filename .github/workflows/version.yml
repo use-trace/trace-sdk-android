@@ -1,0 +1,57 @@
+name: version
+
+# A change to the version is a release: merging it publishes to Maven Central, where a version can never be removed
+# and customers pin it (docs/plans/REPO_AUTOMATION.md in use-trace/trace, decision 2). So this job fails when the
+# version and the README disagree, when a new version is not higher than every tag, and, in its own step that the
+# review loop knows to wait on, when a pull request changes the version without release-approved. It has its own
+# workflow so adding or removing the label runs it again without rerunning the Gradle jobs in ci.yml.
+on:
+  pull_request:
+    types: [opened, synchronize, reopened, labeled, unlabeled]
+
+permissions:
+  contents: read
+  pull-requests: read
+
+jobs:
+  version:
+    name: version
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+      - name: The version agrees in every place
+        id: version
+        run: |
+          echo "version=$(scripts/version.sh)" >> "$GITHUB_OUTPUT"
+          git show "origin/$BASE:trace/build.gradle.kts" | sed -n 's/^version = "\(.*\)"$/base=\1/p' >> "$GITHUB_OUTPUT"
+        env:
+          BASE: ${{ github.base_ref }}
+      - name: A new version is higher than every tag
+        if: steps.version.outputs.version != steps.version.outputs.base
+        env:
+          VERSION: ${{ steps.version.outputs.version }}
+        run: |
+          latest=$(git tag -l 'v*' --sort=-v:refname | head -1)
+          if [ -n "$latest" ] && [ "$(printf '%s\nv%s\n' "$latest" "$VERSION" | sort -V | tail -1)" != "v$VERSION" ] || git rev-parse -q --verify "refs/tags/v$VERSION" >/dev/null; then
+            echo "::error::$VERSION is not higher than the latest tag, $latest. A published version can never be reused."
+            exit 1
+          fi
+          echo "$VERSION is new; the last tag is ${latest:-none}."
+      - name: Waiting for release-approved
+        if: steps.version.outputs.version != steps.version.outputs.base
+        env:
+          GH_TOKEN: ${{ github.token }}
+          PR: ${{ github.event.pull_request.number }}
+          VERSION: ${{ steps.version.outputs.version }}
+          BASE_VERSION: ${{ steps.version.outputs.base }}
+        run: |
+          # Read from GitHub now, not from the event: a pull request opened with the label sends an "opened" event
+          # whose payload has no labels (see auto-merge.yml).
+          if gh pr view "$PR" --repo "$GITHUB_REPOSITORY" --json labels --jq '.labels[].name' | grep -qx release-approved; then
+            echo "Release $VERSION is approved."
+            exit 0
+          fi
+          echo "::error::Waiting for release-approved: the version changes from $BASE_VERSION to $VERSION, and merging publishes $VERSION to Maven Central for good."
+          exit 1

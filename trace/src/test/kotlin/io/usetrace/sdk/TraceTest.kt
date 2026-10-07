@@ -67,9 +67,16 @@ class TraceTest {
             Delivery.DELIVERED
         }
 
-        override fun sendConsent(key: String, analytics: Boolean, marketing: Boolean): Boolean = synchronized(this) {
-            calls.add("consent analytics=$analytics marketing=$marketing")
-            consentKeys.add(key)
+        override fun sendConsent(key: String, analytics: Boolean, marketing: Boolean, firstAnswer: Boolean): Boolean =
+            synchronized(this) {
+                calls.add("consent analytics=$analytics marketing=$marketing")
+                consentKeys.add(key)
+                threads.add(Thread.currentThread().name)
+                true
+            }
+
+        override fun sendFirstRefusal(marketing: Boolean): Boolean = synchronized(this) {
+            calls.add("first refusal marketing=$marketing")
             threads.add(Thread.currentThread().name)
             true
         }
@@ -345,6 +352,9 @@ class TraceTest {
 
     @Test
     fun `a refusal discards the install rather than sending it`() {
+        // Over a day old, so the refusal is not counted either (see the gate's first refusal).
+        shadowOf(context.packageManager).getInternalMutablePackageInfo(context.packageName).firstInstallTime =
+            System.currentTimeMillis() - 25 * 3_600_000L
         val sender = RecordingSender()
         initialise(sender, referrer = raw)
 
@@ -377,7 +387,9 @@ class TraceTest {
     }
 
     @Test
-    fun `a refusal writes no identifier and sends nothing`() {
+    fun `a refusal writes no identifier and sends only the answer, with no identifier`() {
+        shadowOf(context.packageManager).getInternalMutablePackageInfo(context.packageName).firstInstallTime =
+            System.currentTimeMillis() - 60_000
         val sender = RecordingSender()
 
         initialise(sender, referrer = raw)
@@ -386,7 +398,8 @@ class TraceTest {
         Trace.awaitIdle()
 
         assertEquals("a refusal may write nothing at all", emptyList<String>(), written())
-        assertEquals(emptyList<String>(), sender.calls)
+        assertEquals(listOf("first refusal marketing=true"), sender.calls)
+        assertEquals(emptyList<String>(), sender.consentKeys)
         assertNull(Trace.installId)
     }
 

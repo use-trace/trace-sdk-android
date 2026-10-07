@@ -44,6 +44,9 @@ internal class ConsentGate(
     /** What is held while the state is `UNKNOWN`, oldest first. In memory only, never on disk. */
     private val held = ArrayList<Event>()
 
+    /** Whether this process has reported a refusal from an install with no id. In memory only, never on disk. */
+    private var refusalReported = false
+
     /**
      * What the host app has said so far. `UNKNOWN` until [setConsent] is called, and events recorded in that state
      * are held rather than sent.
@@ -88,12 +91,21 @@ internal class ConsentGate(
     internal fun setConsent(analytics: Boolean, marketing: Boolean): Unit = synchronized(this) {
         state = if (analytics) ConsentState.GRANTED else ConsentState.DENIED
 
+        // The install's first answer is the grant that mints its id. Read before get can mint it.
+        val minting = analytics && InstallId.peek(appContext) == null
         // get on a grant, peek on a refusal: a refusal reports an identity that exists and never creates one.
         val key = if (analytics) InstallId.get(appContext) else InstallId.peek(appContext)
-        if (key == null) {
-            TraceLog.log("consent refused before this install had an identity, so there is nothing to withdraw")
+        if (key != null) {
+            sender.sendConsent(key, analytics, marketing, firstAnswer = minting)
+        } else if (!refusalReported && installedWithinADay()) {
+            // Counted, never identified: no key, and nothing written to remember it, because nothing may be written
+            // before a grant. So once a process, in the install's first day, when the banner is answered.
+            // ponytail: a refuser whose process restarts in the first day is counted again, and one who first answers
+            // after it is not counted. Exact needs one empty file written on a refusal, which the rules forbid today.
+            TraceLog.log("consent refused before this install had an identity, reporting the answer with no identifier")
+            refusalReported = sender.sendFirstRefusal(marketing)
         } else {
-            sender.sendConsent(key, analytics, marketing)
+            TraceLog.log("consent refused before this install had an identity, so there is nothing to withdraw")
         }
 
         if (key != null && analytics) {
@@ -104,6 +116,12 @@ internal class ConsentGate(
         }
         held.clear()
     }
+
+    // The Play Store's own record of when the app was first installed, read, never written. Unknown counts as old.
+    private fun installedWithinADay(): Boolean = runCatching {
+        val installed = appContext.packageManager.getPackageInfo(appContext.packageName, 0).firstInstallTime
+        installed > 0 && System.currentTimeMillis() - installed in 0L until DAY_MILLIS
+    }.getOrDefault(false)
 
     // Stamped with the key and GRANTED here, because neither was known when the event was recorded. A first open sent
     // with a wrong configuration (a wrong address, or an api key the API refused) certainly did not reach Trace, so it
@@ -136,6 +154,8 @@ internal class ConsentGate(
 
         /** The most events held at once. Past this the oldest goes, so an unanswered banner cannot fill memory. */
         private const val MAX_HELD: Int = 100
+
+        private const val DAY_MILLIS: Long = 24 * 60 * 60 * 1000L
 
         /**
          * The file that says the install was reported, in the directory Android never backs up: a flag restored onto

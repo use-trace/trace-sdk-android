@@ -159,6 +159,55 @@ class FirstOpenEndToEndTest {
         }
     }
 
+    private fun firstOpens(api: StubApi): Int =
+        api.requests.count { it.path == "/v1/event" && it.json().getString("event_type") == "FIRST_OPEN" }
+
+    /**
+     * An app shipped with a wrong address (the dashboard answers a POST with a web page and a 200) reports its
+     * installs once an update fixes the address, instead of having marked each one sent. Nothing new is written for
+     * it: the grant writes the install id as it always has, and the first open flag waits.
+     */
+    @Test
+    fun `a first open that reached a wrong address is sent again once the address is fixed`() {
+        val wrong = StubApi(200, 200, answer = "<!DOCTYPE html><html><body>Trace</body></html>")
+        launch(wrong)
+        wrong.stop()
+        assertEquals(1, firstOpens(wrong))
+        assertEquals(
+            "a first open that never reached Trace must not be marked sent, and nothing else is written for it",
+            listOf("install_id"),
+            context.noBackupFilesDir.listFiles().orEmpty().map { it.name }.sorted(),
+        )
+
+        Trace.resetForTest()
+        val fixed = StubApi().also { api = it }
+        launch(fixed)
+        assertEquals(1, firstOpens(fixed))
+        fixed.stop()
+
+        Trace.resetForTest()
+        val later = StubApi().also { api = it }
+        launch(later)
+        assertEquals("once delivered, the first open is not sent again", 0, firstOpens(later))
+    }
+
+    /**
+     * The rule the case above is the exception to: a first open the transport gave up on for any other reason is
+     * still marked sent, because the server may have taken it and there is no retry across launches.
+     */
+    @Test
+    fun `a first open that failed for any other reason is not sent again`() {
+        val broken = StubApi(eventStatus = 500)
+        launch(broken)
+        broken.stop()
+        assertEquals(3, firstOpens(broken))
+
+        Trace.resetForTest()
+        val fixed = StubApi().also { api = it }
+        launch(fixed)
+        assertEquals(0, firstOpens(fixed))
+    }
+
     @Test
     fun `a whole launch over a real socket logs nothing that had to be redacted`() {
         val lines = mutableListOf<String>()

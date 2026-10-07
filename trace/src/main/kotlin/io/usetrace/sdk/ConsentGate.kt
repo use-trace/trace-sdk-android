@@ -83,7 +83,7 @@ internal class ConsentGate(
      * the identifier the person has just declined.
      *
      * Nothing is held by the time this returns, flushed or discarded. A send the server did not take is not retried
-     * here: the transport has already tried three times.
+     * here: the transport has already retried what was worth retrying.
      */
     internal fun setConsent(analytics: Boolean, marketing: Boolean): Unit = synchronized(this) {
         state = if (analytics) ConsentState.GRANTED else ConsentState.DENIED

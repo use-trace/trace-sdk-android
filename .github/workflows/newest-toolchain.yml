@@ -50,10 +50,6 @@ jobs:
           grep -qx "kotlin = \"$KOTLIN\"" gradle/libs.versions.toml
           grep -q "gradle-$GRADLE-bin.zip" gradle/wrapper/gradle-wrapper.properties
           grep -q "compileSdk = $SDK\$" trace/build.gradle.kts
-          # Android Gradle plugin 9 compiles Kotlin itself and refuses the Kotlin Android plugin, so drop it as Android
-          # Studio's upgrade assistant does. main still pins 8.x and applies it: the Dependabot pull request to 9 needs
-          # the same two lines deleted for real (https://kotl.in/gradle/agp-built-in-kotlin).
-          if [ "${AGP%%.*}" -ge 9 ]; then sed -i '/libs.plugins.kotlin.android/d' build.gradle.kts trace/build.gradle.kts; fi
           git diff
       - uses: actions/setup-java@v6
         with:

@@ -1,6 +1,9 @@
 [versions]
-# Android Gradle Plugin 8.7 is the pairing for Gradle 8.9, which the wrapper pins.
-agp = "8.7.3"
+# Android Gradle plugin 9 compiles Kotlin itself, so the library module applies no Kotlin plugin. Needs Gradle 9.1 or
+# later, which the wrapper pins.
+agp = "9.4.1"
+# The Kotlin compiler the Android Gradle plugin uses: declaring it at the root with apply false puts this version on the
+# build classpath in place of the older one the plugin bundles.
 kotlin = "2.4.20"
 # The only runtime dependency this SDK is allowed. Nothing else can read the Play Store install referrer.
 installreferrer = "2.2"

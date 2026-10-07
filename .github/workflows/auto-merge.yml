@@ -3,10 +3,19 @@ name: Auto merge
 # Every non draft pull request is set to merge itself (squash) as soon as the required checks pass.
 # The repo setting "Allow auto-merge" only permits this; this workflow is what arms each pull request.
 # Add the "hold" label to keep a pull request back; removing the label puts it back.
+#
+# The labels are read from GitHub when the job runs, not from the event, and runs for one pull request never overlap.
+# `gh pr create --label hold` sends "opened" and "labeled" together; the "opened" payload has no labels, and on 6
+# October 2026 its run switched auto merge back on just after the "labeled" run had switched it off, so a held pull
+# request merged itself (trace-sdk-ios#7, and trace-shopify-app#9 that morning).
 
 on:
   pull_request:
     types: [opened, ready_for_review, reopened, labeled, unlabeled]
+
+concurrency:
+  group: auto-merge-${{ github.event.pull_request.number }}
+  cancel-in-progress: false
 
 permissions:
   contents: write
@@ -20,9 +29,9 @@ jobs:
     env:
       GH_TOKEN: ${{ secrets.AGENT_GITHUB_TOKEN || github.token }}
       PR: ${{ github.event.pull_request.number }}
-      HOLD: ${{ contains(github.event.pull_request.labels.*.name, 'hold') }}
     steps:
       - run: |
+          HOLD=$(gh pr view "$PR" --repo "$GITHUB_REPOSITORY" --json labels --jq '[.labels[].name] | index("hold") != null')
           if [ "$HOLD" = "true" ]; then
             gh pr merge "$PR" --repo "$GITHUB_REPOSITORY" --disable-auto 2>/dev/null || true
             echo "PR $PR is on hold; auto merge off."

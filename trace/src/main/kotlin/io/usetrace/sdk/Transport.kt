@@ -75,6 +75,8 @@ internal class Transport(
             "consent_marketing" to marketing,
             "anon_user_key" to key,
             "timestamp" to Event.nowIso8601(),
+            // The share of people who said yes is worked out per platform (decision 3 of APP_MODELLED_INSTALLS.md).
+            "platform" to "android",
         )
         val accepted = post("/v1/consent", body)
         TraceLog.log("consent ${if (accepted) "accepted" else "not accepted"}")

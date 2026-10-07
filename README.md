@@ -188,7 +188,7 @@ Nothing, until your app calls `setConsent(analytics = true)` (`ConsentGate.kt`).
 | The install id, a random value minted on the grant | `InstallId.kt` |
 | What happened: a first open, a purchase or another conversion, and when | `Event.kt`, `Trace.kt` |
 | The Play Store install referrer, with the first open only: the campaign text the Play Store recorded for the install | `InstallReferrer.kt`, `Trace.kt` |
-| The consent answers, with the install id, and the consent state of each event | `Transport.kt`, `ConsentGate.kt` |
+| The consent answers, with the install id and that this is Android, and the consent state of each event | `Transport.kt`, `ConsentGate.kt` |
 | Your app's version, and that this is an Android app from Google Play | `Trace.kt`, `Event.kt` |
 | A conversion's name, value, currency and metadata, as your app passes them | `Trace.kt` |
 | The SDK's version and the Android version, in the user agent | `Transport.kt` |

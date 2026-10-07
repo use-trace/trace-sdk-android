@@ -111,7 +111,7 @@ internal class ConsentGate(
     private fun send(event: Event, key: String) {
         val delivery = sender.send(event.copy(anonUserKey = key, consentStatus = ConsentState.GRANTED))
         if (event.type != EventType.FIRST_OPEN) return
-        if (delivery == Delivery.WRONG_ADDRESS) {
+        if (delivery == Delivery.WRONG_CONFIGURATION) {
             TraceLog.log("the first open did not reach the Trace API, so the next launch sends it again")
         } else {
             recordFirstOpenSent(appContext)

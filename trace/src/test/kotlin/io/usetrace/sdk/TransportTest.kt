@@ -245,8 +245,8 @@ class TransportTest {
         val api = stub(eventStatus = 200, consentStatus = 200, body = "<!DOCTYPE html><html><body>Trace</body></html>")
         val transport = transport(api.url)
 
-        assertEquals(Delivery.WRONG_ADDRESS, transport.send(firstOpen()))
-        assertEquals(Delivery.WRONG_ADDRESS, transport.send(firstOpen()))
+        assertEquals(Delivery.WRONG_CONFIGURATION, transport.send(firstOpen()))
+        assertEquals(Delivery.WRONG_CONFIGURATION, transport.send(firstOpen()))
         assertFalse(transport.sendConsent(key, analytics = true, marketing = false))
 
         assertEquals("a wrong address stays wrong, so it is not retried", 3, api.requests.size)
@@ -289,7 +289,7 @@ class TransportTest {
             "{\"cookie_set\":true}",
         ).forEach { body ->
             val api = stub(body = body)
-            assertEquals(body, Delivery.WRONG_ADDRESS, transport(api.url).send(firstOpen()))
+            assertEquals(body, Delivery.WRONG_CONFIGURATION, transport(api.url).send(firstOpen()))
             assertEquals(body, 1, api.requests.size)
             api.stop()
         }
@@ -368,8 +368,8 @@ class TransportTest {
     @Test
     fun `a malformed api url returns false rather than throwing`() {
         // A typo in the customer's own configuration. It is not retried either: it will be malformed next time.
-        assertEquals(Delivery.WRONG_ADDRESS, transport("not a url at all").send(firstOpen()))
-        assertEquals(Delivery.WRONG_ADDRESS, transport("telnet://127.0.0.1:1").send(firstOpen()))
+        assertEquals(Delivery.WRONG_CONFIGURATION, transport("not a url at all").send(firstOpen()))
+        assertEquals(Delivery.WRONG_CONFIGURATION, transport("telnet://127.0.0.1:1").send(firstOpen()))
         assertFalse(transport("").sendConsent(key, true, false))
     }
 

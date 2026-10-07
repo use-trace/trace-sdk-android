@@ -27,7 +27,7 @@ internal enum class Delivery {
      * The configured api url is not the Trace API: not an http url, or a 2xx without the API's answer. The event
      * certainly did not reach Trace, so the consent gate does not mark a first open sent.
      */
-    WRONG_ADDRESS,
+    WRONG_CONFIGURATION,
 }
 
 internal interface EventSender {
@@ -116,7 +116,7 @@ internal class Transport(
         val url = runCatching { URL(baseUrl + path) }.getOrNull()
         if (url == null) {
             TraceLog.log("cannot send $path: the configured api url is not a url")
-            return Delivery.WRONG_ADDRESS
+            return Delivery.WRONG_CONFIGURATION
         }
 
         var attempt = 1
@@ -172,7 +172,7 @@ internal class Transport(
                         )
                     }
                     val reason = "answered $status without the Trace API's answer"
-                    Outcome(Delivery.WRONG_ADDRESS, worthRetrying = false, reason = reason)
+                    Outcome(Delivery.WRONG_CONFIGURATION, worthRetrying = false, reason = reason)
                 }
                 // A 4xx is the server saying the payload is wrong, and it will say the same thing again. Retrying
                 // is noise that reads as a flaky network and spends somebody else's data allowance three times.
@@ -185,7 +185,7 @@ internal class Transport(
         } catch (notHttp: Exception) {
             // A configured url that parses but is not HTTP, so openConnection hands back something else. It will
             // not become HTTP on a second attempt.
-            Outcome(Delivery.WRONG_ADDRESS, worthRetrying = false, reason = "the configured api url is not an http url")
+            Outcome(Delivery.WRONG_CONFIGURATION, false, reason = "the configured api url is not an http url")
         } finally {
             runCatching { connection?.disconnect() }
         }

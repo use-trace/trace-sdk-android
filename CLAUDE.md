@@ -86,3 +86,23 @@ is what customers put in the Play Data safety form, so sending a new field chang
 `every field that leaves the device is one the store declarations name` in `TransportTest` fails until it does. `api` compares the public API with
 `trace/api/trace.api`; after a deliberate change to anything public, run `./gradlew :trace:apiDump` and commit the
 file with the change.
+
+## Releasing
+
+The version is `version` in `trace/build.gradle.kts` and nowhere else, apart from the README's dependency line, which
+`scripts/version.sh` holds to it. A version on Maven Central can never be removed or replaced and customers pin it,
+so a release needs a person: a pull request that changes the version waits in the `version` job's "Waiting for
+release-approved" step until it carries `release-approved` (`.github/workflows/version.yml`).
+
+`.github/workflows/release.yml` does the rest on the push to `main`. When the version has no GitHub release and the
+merged pull request carries `release-approved`, it tags `v<version>`, publishes `io.usetrace:trace-sdk-android` to
+Maven Central through the Central Portal (`com.vanniktech.maven.publish`: the release AAR with sources and javadoc
+jars, signed, POM from the `POM_` lines in `gradle.properties`), creates the GitHub release with the AAR and the pull
+request's title and body as its notes, then builds a throwaway app against the version from Central
+(`scripts/resolve-check.sh`), retrying for up to an hour while Central syncs. Without the four secrets
+(`MAVEN_CENTRAL_USERNAME`, `MAVEN_CENTRAL_PASSWORD`, `SIGNING_KEY`, `SIGNING_KEY_PASSWORD`) or a licence, or when the
+Central Portal refuses the token or the key does not unlock or is on no public keyserver, it stops red before tagging. A merged pull request without the label publishes nothing and says so. On every pull request the
+same workflow is a dry run: the real token and key checked when they are set, the build signed with a throwaway
+ed25519 key, published to Maven Local, each signature checked and resolved from there.
+
+A bad release is fixed by a new patch version, never by moving a tag.

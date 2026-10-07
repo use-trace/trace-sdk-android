@@ -168,6 +168,20 @@ class TransportTest {
         assertFalse(body.getBoolean("consent_marketing"))
     }
 
+    /**
+     * Decided 7 October 2026 (decision 3 of docs/plans/APP_MODELLED_INSTALLS.md in use-trace/trace): the share of
+     * people who said yes is worked out per platform, so the consent call says which platform answered. A refusal
+     * carries it too, because a no is half of that share.
+     */
+    @Test
+    fun `a consent call says it is from an android app`() {
+        val api = stub()
+
+        transport(api.url).sendConsent(key, analytics = false, marketing = false)
+
+        assertEquals("android", api.requests.single().json().getString("platform"))
+    }
+
     @Test
     fun `a first open sends the referrer byte for byte`() {
         val api = stub()

@@ -65,6 +65,14 @@ SDK is written: `Trace` and `TraceConfig` are its whole public surface, and ever
 `internal` (`BuildConfig` is public because the Android Gradle plugin generates it so). The plan in `docs/` records
 which task built each file.
 
+`.github/workflows/newest-toolchain.yml` builds and tests every Monday on the newest stable Android Gradle plugin,
+Kotlin, Gradle, compileSdk and LTS JDK, applied to a throwaway checkout. A failure opens one `incident` issue titled
+"Newest toolchain run is failing" and alerts, through a copy of the monorepo's shared recorder (a public repository
+cannot call a workflow in a private one); the next pass closes it. It means the pinned versions are about to stop
+working for a customer on the newest tools, not that `main` is broken. On Android Gradle plugin 9 and later it also
+drops the Kotlin Android plugin, which 9 refuses because it compiles Kotlin itself; the Dependabot pull request that
+moves `agp` to 9 has to delete those two lines for real.
+
 `privacy` is `scripts/check-privacy.sh`: the rules above, as a check. The README's "What to declare to the stores"
 is what customers put in the Play Data safety form, so sending a new field changes it in the same pull request;
 `every field that leaves the device is one the store declarations name` in `TransportTest` fails until it does. `api` compares the public API with

@@ -24,7 +24,9 @@ jobs:
       - name: The version agrees in every place
         id: version
         run: |
-          echo "version=$(scripts/version.sh)" >> "$GITHUB_OUTPUT"
+          # Assigned first: a failure inside echo's argument would not fail the step.
+          version=$(scripts/version.sh)
+          echo "version=$version" >> "$GITHUB_OUTPUT"
           git show "origin/$BASE:trace/build.gradle.kts" | sed -n 's/^version = "\(.*\)"$/base=\1/p' >> "$GITHUB_OUTPUT"
         env:
           BASE: ${{ github.base_ref }}

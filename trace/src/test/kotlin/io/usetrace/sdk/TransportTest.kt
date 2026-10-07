@@ -316,13 +316,26 @@ class TransportTest {
         assertEquals("a refused payload must be sent once and once only", 1, api.requests.size)
     }
 
+    /**
+     * A wrong or revoked api key is a wrong configuration like a wrong address: not retried, said once with logging
+     * off, and reported apart from a failure so the consent gate sends the first open again on a later launch.
+     */
     @Test
-    fun `a 401 is not retried either`() {
-        val api = stub(eventStatus = 401)
+    fun `a 401 or 403 is a wrong configuration, is not retried and is logged once with logging off`() {
+        listOf(401, 403).forEach { status ->
+            val lines = CopyOnWriteArrayList<String>()
+            TraceLog.redirect { lines.add(it) }
+            val api = stub(eventStatus = status)
+            val transport = transport(api.url)
 
-        assertEquals(Delivery.FAILED, transport(api.url).send(firstOpen()))
+            assertEquals("$status", Delivery.WRONG_CONFIGURATION, transport.send(firstOpen()))
+            assertEquals("$status", Delivery.WRONG_CONFIGURATION, transport.send(firstOpen()))
 
-        assertEquals("a wrong api key will be wrong on the second attempt as well", 1, api.requests.size)
+            assertEquals("a wrong api key will be wrong on the second attempt as well", 2, api.requests.size)
+            assertEquals("$status", 1, lines.size)
+            assertTrue(lines.single(), "check the configured api key" in lines.single())
+            api.stop()
+        }
     }
 
     @Test

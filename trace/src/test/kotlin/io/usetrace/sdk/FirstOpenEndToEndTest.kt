@@ -191,8 +191,29 @@ class FirstOpenEndToEndTest {
         assertEquals("once delivered, the first open is not sent again", 0, firstOpens(later))
     }
 
+    /** A wrong or revoked api key is the same: the first open never reached Trace, so a later launch sends it again. */
+    @Test
+    fun `a first open refused for its key is sent again once the key is fixed`() {
+        listOf(401, 403).forEach { status ->
+            context.noBackupFilesDir.listFiles().orEmpty().forEach { it.delete() }
+            Trace.resetForTest()
+            val refusing = StubApi(status, status)
+            launch(refusing)
+            refusing.stop()
+            assertEquals("$status", 1, firstOpens(refusing))
+            val written = context.noBackupFilesDir.listFiles().orEmpty().map { it.name }.sorted()
+            assertEquals("$status", listOf("install_id"), written)
+
+            Trace.resetForTest()
+            val fixed = StubApi().also { api = it }
+            launch(fixed)
+            assertEquals("$status", 1, firstOpens(fixed))
+            fixed.stop()
+        }
+    }
+
     /**
-     * The rule the case above is the exception to: a first open the transport gave up on for any other reason is
+     * The rule the cases above are the exception to: a first open the transport gave up on for any other reason is
      * still marked sent, because the server may have taken it and there is no retry across launches.
      */
     @Test

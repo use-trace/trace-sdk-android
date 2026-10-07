@@ -128,27 +128,35 @@ jobs:
             echo "::error::$1 Nothing was tagged or published."
             exit 1
           }
-          [ -n "$MAVEN_CENTRAL_USERNAME" ] && [ -n "$MAVEN_CENTRAL_PASSWORD" ] && [ -n "$SIGNING_KEY" ] && [ -n "$SIGNING_KEY_PASSWORD" ] || { echo "Skipped: not every secret is set."; exit 0; }
-
-          export GNUPGHOME=$(mktemp -d)
-          printf '%s\n' "$SIGNING_KEY" | gpg --batch --import 2> /dev/null || problem "SIGNING_KEY is not an armoured private key (gpg --armor --export-secret-keys <id>)."
-          fingerprint=$(gpg --batch --list-secret-keys --with-colons | awk -F: '/^fpr:/ { print $10; exit }')
-          echo check | gpg --batch --pinentry-mode loopback --passphrase "$SIGNING_KEY_PASSWORD" --detach-sign > /dev/null 2>&1 \
-            || problem "SIGNING_KEY_PASSWORD does not unlock SIGNING_KEY ($fingerprint)."
-          if curl -sf "https://keys.openpgp.org/vks/v1/by-fingerprint/$fingerprint" > /dev/null \
-            || curl -sf "https://keyserver.ubuntu.com/pks/lookup?op=get&search=0x$fingerprint" > /dev/null; then
-            echo "Signing key $fingerprint unlocks and is on a public keyserver."
-          else
-            problem "The public half of $fingerprint is on neither keys.openpgp.org nor keyserver.ubuntu.com, so Central cannot check the signatures: gpg --keyserver keys.openpgp.org --send-keys $fingerprint"
+          # Each half is checked as soon as its secrets are set, in a subshell so a dry run's warning about one still
+          # checks the other. The step before stops a release that lacks any secret.
+          if [ -n "$SIGNING_KEY" ] && [ -n "$SIGNING_KEY_PASSWORD" ]; then (
+            export GNUPGHOME=$(mktemp -d)
+            printf '%s\n' "$SIGNING_KEY" | gpg --batch --import 2> /dev/null || problem "SIGNING_KEY is not an armoured private key (gpg --armor --export-secret-keys <id>)."
+            fingerprint=$(gpg --batch --list-secret-keys --with-colons | awk -F: '/^fpr:/ { print $10; exit }')
+            echo check | gpg --batch --pinentry-mode loopback --passphrase "$SIGNING_KEY_PASSWORD" --detach-sign > /dev/null 2>&1 \
+              || problem "SIGNING_KEY_PASSWORD does not unlock SIGNING_KEY ($fingerprint)."
+            if curl -sf "https://keys.openpgp.org/vks/v1/by-fingerprint/$fingerprint" > /dev/null \
+              || curl -sf "https://keyserver.ubuntu.com/pks/lookup?op=get&search=0x$fingerprint" > /dev/null; then
+              echo "Signing key $fingerprint unlocks and is on a public keyserver."
+            else
+              problem "The public half of $fingerprint is on neither keys.openpgp.org nor keyserver.ubuntu.com, so Central cannot check the signatures: gpg --keyserver keys.openpgp.org --send-keys $fingerprint"
+            fi
+          ) else
+            echo "Signing key not checked: SIGNING_KEY or SIGNING_KEY_PASSWORD is not set."
           fi
 
-          token=$(printf '%s:%s' "$MAVEN_CENTRAL_USERNAME" "$MAVEN_CENTRAL_PASSWORD" | base64 -w0)
-          status=$(curl -s -o "$RUNNER_TEMP/central.json" -w '%{http_code}' -H "Authorization: Bearer $token" \
-            "https://central.sonatype.com/api/v1/publisher/published?namespace=io.usetrace&name=trace-sdk-android&version=$VERSION")
-          [ "$status" = 200 ] || problem "The Central Portal answered $status to MAVEN_CENTRAL_USERNAME and MAVEN_CENTRAL_PASSWORD ($(head -c 300 "$RUNNER_TEMP/central.json")). They are a user token from central.sonatype.com, Account, Generate User Token."
-          published=$(jq -r '.published' "$RUNNER_TEMP/central.json")
-          echo "published=$published" >> "$GITHUB_OUTPUT"
-          echo "The Central Portal accepts the token; io.usetrace:trace-sdk-android:$VERSION published already: $published."
+          if [ -n "$MAVEN_CENTRAL_USERNAME" ] && [ -n "$MAVEN_CENTRAL_PASSWORD" ]; then (
+            token=$(printf '%s:%s' "$MAVEN_CENTRAL_USERNAME" "$MAVEN_CENTRAL_PASSWORD" | base64 -w0)
+            status=$(curl -s -o "$RUNNER_TEMP/central.json" -w '%{http_code}' -H "Authorization: Bearer $token" \
+              "https://central.sonatype.com/api/v1/publisher/published?namespace=io.usetrace&name=trace-sdk-android&version=$VERSION")
+            [ "$status" = 200 ] || problem "The Central Portal answered $status to MAVEN_CENTRAL_USERNAME and MAVEN_CENTRAL_PASSWORD ($(head -c 300 "$RUNNER_TEMP/central.json")). They are a user token from central.sonatype.com, Account, Generate User Token."
+            published=$(jq -r '.published' "$RUNNER_TEMP/central.json")
+            echo "published=$published" >> "$GITHUB_OUTPUT"
+            echo "The Central Portal accepts the token; io.usetrace:trace-sdk-android:$VERSION published already: $published."
+          ) else
+            echo "Central token not checked: MAVEN_CENTRAL_USERNAME or MAVEN_CENTRAL_PASSWORD is not set."
+          fi
 
       - uses: actions/setup-java@v6
         if: steps.plan.outputs.go == 'true'

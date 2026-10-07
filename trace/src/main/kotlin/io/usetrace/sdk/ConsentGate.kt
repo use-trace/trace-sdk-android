@@ -103,8 +103,7 @@ internal class ConsentGate(
             // ponytail: a refuser whose process restarts in the first day is counted again, and one who first answers
             // after it is not counted. Exact needs one empty file written on a refusal, which the rules forbid today.
             TraceLog.log("consent refused before this install had an identity, reporting the answer with no identifier")
-            sender.sendFirstRefusal(marketing)
-            refusalReported = true
+            refusalReported = sender.sendFirstRefusal(marketing)
         } else {
             TraceLog.log("consent refused before this install had an identity, so there is nothing to withdraw")
         }

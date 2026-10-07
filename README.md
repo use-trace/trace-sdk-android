@@ -37,10 +37,8 @@ app's own backup rules say, so you do not need a `data_extraction_rules.xml` ent
 
 ## Adding the dependency
 
-The artefact is `io.usetrace:trace-sdk-android`. It is **not published to Maven Central yet**: publication is a
-separate piece of work with its own signing decisions. Until it is published, build the AAR from this repository
-with `./gradlew :trace:assembleRelease` and add it to your app as a local file. Once it is published, the
-declaration is:
+The SDK is on Maven Central as `io.usetrace:trace-sdk-android`. With `mavenCentral()` in your repositories, which
+new Android projects have already, add:
 
 ```kotlin
 dependencies {
@@ -305,3 +303,7 @@ ones that assert what crosses the wire run against an HTTP server on a loopback 
 is behind an interface the tests drive themselves.
 
 See `CLAUDE.md` for the rules this repository works under, and `docs/` for the plan the slices follow.
+
+## Licence
+
+Apache License, Version 2.0. See `LICENSE`.

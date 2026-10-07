@@ -57,10 +57,9 @@ internal object TraceLog {
     /**
      * Writes one line whether or not logging was turned on, with anything identity shaped removed first.
      *
-     * For the one mistake a host app can make before it has turned logging on: calling the api before
-     * [Trace.initialise]. `debugLogging` arrives with the config, so a misuse that happens earlier than that would
-     * otherwise be reported into a log nobody can switch on. Nothing in normal running uses this, so a quiet app
-     * stays quiet.
+     * For the two mistakes a host app can make without having turned logging on: calling the api before
+     * [Trace.initialise], where `debugLogging` has not arrived yet, and configuring an api url that is not the Trace
+     * API, which [Transport] says once. Nothing in normal running uses this, so a quiet app stays quiet.
      *
      * It is redacted like any other line. Louder is not laxer.
      */

@@ -24,8 +24,9 @@ internal enum class Delivery {
     FAILED,
 
     /**
-     * The configured api url is not the Trace API: not an http url, or a 2xx without the API's answer. The event
-     * certainly did not reach Trace, so the consent gate does not mark a first open sent.
+     * The configuration is wrong: the api url is not the Trace API (not a url, not http, or a 2xx without the API's
+     * answer), or the API refused the api key with a 401 or 403. The event certainly did not reach Trace, so the
+     * consent gate does not mark a first open sent.
      */
     WRONG_CONFIGURATION,
 }
@@ -165,14 +166,16 @@ internal class Transport(
                 status in 200..299 && isTraceAnswer(answer, path) ->
                     Outcome(Delivery.DELIVERED, worthRetrying = false, reason = "accepted")
                 status in 200..299 -> {
-                    if (!warned.getAndSet(true)) {
-                        TraceLog.warn(
-                            "$path answered $status but not as the Trace API does, so nothing is being delivered: " +
-                                "check the configured api url",
-                        )
-                    }
+                    warnOnce(
+                        "$path answered $status but not as the Trace API does, so nothing is being delivered: " +
+                            "check the configured api url",
+                    )
                     val reason = "answered $status without the Trace API's answer"
                     Outcome(Delivery.WRONG_CONFIGURATION, worthRetrying = false, reason = reason)
+                }
+                status == 401 || status == 403 -> {
+                    warnOnce("$path was refused with $status, so nothing is being delivered: check the api key")
+                    Outcome(Delivery.WRONG_CONFIGURATION, worthRetrying = false, reason = "refused with $status")
                 }
                 // A 4xx is the server saying the payload is wrong, and it will say the same thing again. Retrying
                 // is noise that reads as a flaky network and spends somebody else's data allowance three times.
@@ -189,6 +192,11 @@ internal class Transport(
         } finally {
             runCatching { connection?.disconnect() }
         }
+    }
+
+    /** Writes [line] whether or not the host app turned logging on, once per transport. */
+    private fun warnOnce(line: String) {
+        if (!warned.getAndSet(true)) TraceLog.warn(line)
     }
 
     /** Whether [answer] is what the Trace API answers [path] with when it has taken the request. */

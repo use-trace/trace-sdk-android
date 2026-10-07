@@ -333,7 +333,7 @@ class TransportTest {
 
             assertEquals("a wrong api key will be wrong on the second attempt as well", 2, api.requests.size)
             assertEquals("$status", 1, lines.size)
-            assertTrue(lines.single(), "check the configured api key" in lines.single())
+            assertTrue(lines.single(), "check the api key" in lines.single())
             api.stop()
         }
     }

@@ -5,7 +5,17 @@ updates:
     directory: /
     schedule:
       interval: weekly
+    ignore:
+      # gradle/actions 6 moved its caching into a closed component and taking it means accepting Gradle's Terms of
+      # Use. That is a decision for a person, not a Dependabot merge. 5 is still offered.
+      - dependency-name: gradle/actions
+        versions: [">= 6"]
   - package-ecosystem: gradle
     directory: /
     schedule:
       interval: weekly
+    ignore:
+      # Robolectric 4.16 dropped Android 5.0 and 5.1, so it cannot run the unit tests at minSdk 21, which every test
+      # runs at. Raising minSdk is a change to what customers can ship on, not a test dependency bump.
+      - dependency-name: org.robolectric:robolectric
+        versions: [">= 4.16"]

@@ -21,9 +21,17 @@ internal interface EventSender {
     /**
      * Sends the consent answers under [key], returning whether the server took them. Never throws.
      *
-     * [key] is not optional: see [Transport.sendConsent] for what the server does without it.
+     * [key] is not optional: see [Transport.sendConsent] for what the server does without it. [firstAnswer] says
+     * whether this is the install's first answer, so the server counts each install's answer once.
      */
-    fun sendConsent(key: String, analytics: Boolean, marketing: Boolean): Boolean
+    fun sendConsent(key: String, analytics: Boolean, marketing: Boolean, firstAnswer: Boolean = false): Boolean
+
+    /**
+     * Reports a refusal from an install that has no id, so the server can count the answer. It carries no
+     * identifier of any kind: `consent_analytics` false, the marketing answer, the time, the platform and
+     * `first_answer` true. Returns whether the server took it. Never throws.
+     */
+    fun sendFirstRefusal(marketing: Boolean): Boolean
 }
 
 /**
@@ -69,15 +77,21 @@ internal class Transport(
      * without one makes the server mint a key of its own and record it as though it were the app's install id,
      * which is a false provenance rather than a missing field.
      */
-    override fun sendConsent(key: String, analytics: Boolean, marketing: Boolean): Boolean {
-        val body = Json.obj(
+    override fun sendConsent(key: String, analytics: Boolean, marketing: Boolean, firstAnswer: Boolean): Boolean =
+        postConsent(
             "consent_analytics" to analytics,
             "consent_marketing" to marketing,
             "anon_user_key" to key,
-            "timestamp" to Event.nowIso8601(),
-            // The share of people who said yes is worked out per platform (decision 3 of APP_MODELLED_INSTALLS.md).
-            "platform" to "android",
+            "first_answer" to firstAnswer,
         )
+
+    override fun sendFirstRefusal(marketing: Boolean): Boolean =
+        postConsent("consent_analytics" to false, "consent_marketing" to marketing, "first_answer" to true)
+
+    // The share of people who said yes is worked out per platform, counting each install's answer once by
+    // first_answer (decision 3 of APP_MODELLED_INSTALLS.md in use-trace/trace).
+    private fun postConsent(vararg answer: Pair<String, Any?>): Boolean {
+        val body = Json.obj(*answer, "timestamp" to Event.nowIso8601(), "platform" to "android")
         val accepted = post("/v1/consent", body)
         TraceLog.log("consent ${if (accepted) "accepted" else "not accepted"}")
         return accepted

@@ -111,7 +111,8 @@ fun onBannerAnswered(analytics: Boolean, marketing: Boolean) {
 
 Granting writes the install id, sends the consent record and then everything held, oldest first. Refusing throws
 away everything held and writes nothing. If an earlier grant left an install id, refusing also sends the consent
-record, which withdraws that grant; with no install id there is nothing to withdraw and nothing is sent. What the
+record, which withdraws that grant. With no install id, a refusal in the install's first day is reported with no
+identifier, so that Trace can count it (see "Counting each answer once" below). What the
 grant already sent stays with Trace until it is erased (see "What to declare to the stores"). Someone who refuses and later agrees is tracked from the moment they agreed.
 
 **Call `setConsent` on every launch, from the answer your app stored.** The SDK does not keep the answer: the
@@ -128,6 +129,24 @@ Nothing before the person grants consent. Decided on 6 October 2026, before the 
 | Before an answer | Nothing. The first open and any conversions are held in memory only. |
 | On a grant | `install_id`, the install id, if there is not one yet. `first_open_sent`, once the first open has been sent. |
 | On a refusal | Nothing. |
+
+### Counting each answer once
+
+Trace works out the share of people who said yes, per platform, from each install's first answer. So every consent
+call says whether it is that first answer, and a refusal from an install with no id is reported with nothing that
+identifies anyone:
+
+| Consent call | Sent | Fields |
+| --- | --- | --- |
+| A grant | On every launch | `consent_analytics` true, `consent_marketing`, `anon_user_key`, `timestamp`, `platform` `android`, `first_answer` |
+| A refusal after an earlier grant | On every launch, and it withdraws that grant | as a grant, with `consent_analytics` false |
+| A refusal with no install id | At most once a process, and only in the install's first 24 hours | `consent_analytics` false, `consent_marketing`, `timestamp`, `platform` `android`, `first_answer` true. No `anon_user_key` and no other identifier. |
+
+`first_answer` is true on the grant that mints the install id and on the refusal above, and false on everything
+else. Nothing is written to remember any of it: the install's age comes from the Play Store's own record of when the
+app was first installed (`PackageInfo.firstInstallTime`), which the SDK reads and does not send. So the count of
+refusals is close, not exact: a refusal is counted again if the app's process restarts in its first day, and not at
+all if the person first answers after it.
 
 The SDK does not store the consent answer. Your app does, and passes it to `setConsent` on every launch.
 
@@ -181,14 +200,16 @@ not the whole of your app's form. They follow Google's definitions as read on 6 
 
 ### What leaves the device
 
-Nothing, until your app calls `setConsent(analytics = true)` (`ConsentGate.kt`). After that:
+Before a grant, only a refusal in the install's first day, with no identifier: that the person said no, their
+marketing answer, the time, and that this is Android (`ConsentGate.kt`, `Transport.kt`). After
+`setConsent(analytics = true)`:
 
 | Sent | Where it comes from |
 | --- | --- |
 | The install id, a random value minted on the grant | `InstallId.kt` |
 | What happened: a first open, a purchase or another conversion, and when | `Event.kt`, `Trace.kt` |
 | The Play Store install referrer, with the first open only: the campaign text the Play Store recorded for the install | `InstallReferrer.kt`, `Trace.kt` |
-| The consent answers, with the install id and that this is Android, and the consent state of each event | `Transport.kt`, `ConsentGate.kt` |
+| The consent answers, with the install id, that this is Android and whether this is the install's first answer, and the consent state of each event | `Transport.kt`, `ConsentGate.kt` |
 | Your app's version, and that this is an Android app from Google Play | `Trace.kt`, `Event.kt` |
 | A conversion's name, value, currency and metadata, as your app passes them | `Trace.kt` |
 | The SDK's version and the Android version, in the user agent | `Transport.kt` |
@@ -220,7 +241,7 @@ anything more being sent, but does not by itself delete what was already sent.
 | Data type | What the SDK sends | Collected | Shared | Purposes |
 | --- | --- | --- | --- | --- |
 | Device or other IDs | The install id | Yes | No | Analytics, Advertising or marketing |
-| App activity: App interactions | The first open with its install referrer, and each conversion with its name and metadata | Yes | No | Analytics, Advertising or marketing |
+| App activity: App interactions | The first open with its install referrer, each conversion with its name and metadata, and a refusal reported with no identifier | Yes | No | Analytics, Advertising or marketing |
 | Financial info: Purchase history | A conversion's value and currency, and a conversion named `purchase` | Yes | No | Analytics, Advertising or marketing |
 
 Leave out Purchase history only if your app never passes a value and never records `purchase`.
@@ -231,7 +252,7 @@ transfer to a service provider as sharing. Trace does not sell it or pass it to 
 **Not processed ephemerally.** Trace keeps it, to report on it.
 
 **Required or optional.** Google lets you say optional only if every user, in every region, can choose. The SDK
-sends nothing until your app calls `setConsent(analytics = true)`, so if your app asks every user and passes their
+sends nothing identifying until your app calls `setConsent(analytics = true)`, so if your app asks every user and passes their
 answer, answer optional. If your app grants on a user's behalf anywhere, answer required.
 
 **Purposes.** Analytics, because Trace reports how people came to install and convert. Advertising or marketing,

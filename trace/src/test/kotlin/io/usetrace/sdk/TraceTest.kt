@@ -25,8 +25,8 @@ import java.io.File
  * called from.
  *
  * The transport and the Play referrer client are both injected, so the suite needs no network and no Play Services.
- * Robolectric, because the send once flag and the held queue are real files in a real no-backup directory, and the
- * test that matters most is the one that reads the flag back in a second process.
+ * Robolectric, because the install id and the send once flag are real files in a real no-backup directory, and the
+ * tests that matter most read that directory back: empty before an answer, and the flag in a second process.
  */
 @RunWith(RobolectricTestRunner::class)
 class TraceTest {
@@ -60,16 +60,23 @@ class TraceTest {
         val consentKeys = mutableListOf<String>()
         val threads = mutableSetOf<String>()
 
-        override fun send(event: Event): Boolean = synchronized(this) {
+        override fun send(event: Event): Delivery = synchronized(this) {
             calls.add("event ${event.type}${event.eventName?.let { " $it" } ?: ""}")
             events.add(event)
             threads.add(Thread.currentThread().name)
-            true
+            Delivery.DELIVERED
         }
 
-        override fun sendConsent(key: String, analytics: Boolean, marketing: Boolean): Boolean = synchronized(this) {
-            calls.add("consent analytics=$analytics marketing=$marketing")
-            consentKeys.add(key)
+        override fun sendConsent(key: String, analytics: Boolean, marketing: Boolean, firstAnswer: Boolean): Boolean =
+            synchronized(this) {
+                calls.add("consent analytics=$analytics marketing=$marketing")
+                consentKeys.add(key)
+                threads.add(Thread.currentThread().name)
+                true
+            }
+
+        override fun sendFirstRefusal(marketing: Boolean): Boolean = synchronized(this) {
+            calls.add("first refusal marketing=$marketing")
             threads.add(Thread.currentThread().name)
             true
         }
@@ -144,7 +151,7 @@ class TraceTest {
         initialise(sender, referrer = raw)
 
         assertEquals(emptyList<String>(), sender.calls)
-        assertTrue("a held first open belongs on disk, because a kill before the banner loses it otherwise", File(context.noBackupFilesDir, "held_events").isFile)
+        assertFalse("a held first open is held in memory, never on disk", File(context.noBackupFilesDir, "held_events").exists())
     }
 
     @Test
@@ -171,8 +178,10 @@ class TraceTest {
     @Test
     fun `the send once flag is kept where android never backs it up`() {
         initialise(RecordingSender(), referrer = raw)
+        Trace.setConsent(analytics = true)
+        Trace.awaitIdle()
 
-        // Beside the install id and the held queue, and for a sharper reason than either: a flag restored onto a
+        // Beside the install id, and for a sharper reason: a flag restored onto a
         // fresh install would suppress that install's first open, and the install is the one event that cannot be
         // sent again. A missing flag over counts; a restored one loses the customer.
         assertTrue(File(context.noBackupFilesDir, "first_open_sent").isFile)
@@ -294,11 +303,15 @@ class TraceTest {
     }
 
     @Test
-    fun `installId is null before initialise and the id afterwards`() {
+    fun `installId is null until consent is granted and the id afterwards`() {
         assertNull("a privacy screen must be able to say there is no id yet, truthfully", Trace.installId)
 
         val sender = RecordingSender()
         initialise(sender, referrer = raw)
+        assertNull("no id exists before the person has agreed", Trace.installId)
+
+        Trace.setConsent(analytics = true)
+        Trace.awaitIdle()
 
         assertNotNull(Trace.installId)
         assertTrue(Trace.installId!!.startsWith("auk_app_"))
@@ -339,13 +352,121 @@ class TraceTest {
 
     @Test
     fun `a refusal discards the install rather than sending it`() {
+        // Over a day old, so the refusal is not counted either (see the gate's first refusal).
+        shadowOf(context.packageManager).getInternalMutablePackageInfo(context.packageName).firstInstallTime =
+            System.currentTimeMillis() - 25 * 3_600_000L
         val sender = RecordingSender()
         initialise(sender, referrer = raw)
 
         Trace.setConsent(analytics = false)
         Trace.awaitIdle()
 
-        assertEquals(emptyList<Event>(), sender.events)
-        assertEquals(listOf("consent analytics=false marketing=false"), sender.calls)
+        // No consent call either: there is no install id to withdraw under, and minting one to report a refusal
+        // would create the identifier the person has just declined.
+        assertEquals(emptyList<String>(), sender.calls)
+    }
+
+    // Decided 6 October 2026, before the first release: nothing is stored before consent. The first open waits in
+    // memory only; the id and the install are written the moment the person accepts, and a refusal never writes an
+    // identifier. These are that decision as tests, over the real directory the SDK writes to.
+
+    /** Every file the SDK has written. Its only directory is the no-backup one. */
+    private fun written(): List<String> = context.noBackupFilesDir.listFiles().orEmpty().map { it.name }.sorted()
+
+    @Test
+    fun `a fresh install that never answers writes no file at all`() {
+        val sender = RecordingSender()
+
+        initialise(sender, referrer = raw)
+        Trace.conversion("purchase", value = 30.0)
+        Trace.awaitIdle()
+
+        assertEquals("nothing may be written to the device before the person has answered", emptyList<String>(), written())
+        assertEquals(emptyList<String>(), sender.calls)
+        assertNull(Trace.installId)
+    }
+
+    @Test
+    fun `a refusal writes no identifier and sends only the answer, with no identifier`() {
+        shadowOf(context.packageManager).getInternalMutablePackageInfo(context.packageName).firstInstallTime =
+            System.currentTimeMillis() - 60_000
+        val sender = RecordingSender()
+
+        initialise(sender, referrer = raw)
+        Trace.conversion("purchase", value = 30.0)
+        Trace.setConsent(analytics = false, marketing = true)
+        Trace.awaitIdle()
+
+        assertEquals("a refusal may write nothing at all", emptyList<String>(), written())
+        assertEquals(listOf("first refusal marketing=true"), sender.calls)
+        assertEquals(emptyList<String>(), sender.consentKeys)
+        assertNull(Trace.installId)
+    }
+
+    @Test
+    fun `acceptance writes the id, sends exactly one first open with it, then the held events in order`() {
+        val sender = RecordingSender()
+
+        initialise(sender, referrer = raw)
+        Trace.conversion("signup")
+        Trace.conversion("purchase", value = 30.0)
+        Trace.setConsent(analytics = true)
+        Trace.awaitIdle()
+
+        val id = InstallId.peek(context)
+        assertNotNull("the grant should have written the install id", id)
+        assertEquals(listOf("first_open_sent", "install_id"), written())
+        assertEquals(
+            listOf(
+                "consent analytics=true marketing=false",
+                "event FIRST_OPEN",
+                "event CUSTOM signup",
+                "event PURCHASE purchase",
+            ),
+            sender.calls,
+        )
+        assertEquals(listOf(id), sender.consentKeys)
+        assertEquals("every event carries the id the grant wrote", listOf(id, id, id), sender.events.map { it.anonUserKey })
+        assertEquals(raw, sender.events.first().installReferrer)
+    }
+
+    @Test
+    fun `a conversion held before acceptance is sent after it`() {
+        val sender = RecordingSender()
+        initialise(sender, referrer = raw)
+
+        Trace.conversion("purchase", value = 30.0, currency = "GBP")
+        Trace.awaitIdle()
+        assertEquals(emptyList<String>(), sender.calls)
+
+        Trace.setConsent(analytics = true)
+        Trace.awaitIdle()
+
+        val purchase = sender.events.single { it.type == EventType.PURCHASE }
+        assertEquals("event PURCHASE purchase", sender.calls.last())
+        assertEquals(ConsentState.GRANTED, purchase.consentStatus)
+        assertEquals(InstallId.peek(context), purchase.anonUserKey)
+        assertEquals(30.0, purchase.value!!, 0.0)
+    }
+
+    @Test
+    fun `a restart before any answer is a first open again`() {
+        initialise(RecordingSender(), referrer = raw)
+        Trace.conversion("signup")
+        Trace.awaitIdle()
+
+        // The process is killed with the banner still on screen. Nothing was written, so the next launch knows
+        // nothing of this one: the held conversion is lost, which is the accepted cost, and the install is new.
+        Trace.resetForTest()
+        assertEquals(emptyList<String>(), written())
+
+        val sender = RecordingSender()
+        initialise(sender, referrer = raw)
+        Trace.setConsent(analytics = true)
+        Trace.awaitIdle()
+
+        assertEquals(listOf("consent analytics=true marketing=false", "event FIRST_OPEN"), sender.calls)
+        assertEquals(InstallId.peek(context), sender.events.single().anonUserKey)
+        assertEquals(raw, sender.events.single().installReferrer)
     }
 }

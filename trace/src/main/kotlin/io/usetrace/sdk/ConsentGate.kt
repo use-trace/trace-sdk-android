@@ -9,20 +9,22 @@ import java.io.File
  * The rule it exists for is hold, then send. Not send, then apologise: an event sent before the banner was answered
  * cannot be unsent, and the server deleting it later is not the same thing as never having had it.
  *
+ * **Nothing is written to the device before consent.** Decided 6 October 2026, before the first release. The held
+ * events live in memory only, the install id is minted and written by the grant, and the first open flag is written
+ * when the first open is sent. A refusal writes nothing. The cost is accepted: an app killed with its banner still on
+ * screen loses what was held, and its next launch, finding no first open flag, records a first open again.
+ *
  * **The consent call goes before the held events, always.** On a consent gated site the server buffers an event it
  * receives without consent and replays it once consent arrives, taking the anonymous key from the consent call. An
  * event that overtakes the consent call makes the server mint a key of its own and record it as though it were this
  * app's install id, which is a false provenance, not a missing field, and nothing on this side can see it happen.
  *
+ * Events are recorded with no key, because before a grant there is none, and the gate stamps the install id on each
+ * one as it sends it.
+ *
  * `analytics` is the answer that gates events. `marketing` is passed on to the server for the record and never
  * decides whether an event is sent, so marketing alone discards the queue like any other refusal and does not even
  * mint an install id.
- *
- * **The queue is on disk, not in memory.** An app killed while its banner is still on screen would otherwise lose
- * its first open, and the first open is the one event that cannot be sent again: it carries the install referrer,
- * and the referrer is the channel that paid for the install. The file is in `Context.getNoBackupFilesDir()`, the
- * same directory as the install id and for the same reason: it carries that id, so a queue restored onto a later
- * install would send events for a visitor who no longer exists, and no host app's backup rules can reach in there.
  *
  * It does not persist the consent state. A new process starts at `UNKNOWN` and holds, until the host app tells it
  * what the person answered, which an app has to do on every launch anyway because the answer is the app's to keep.
@@ -35,11 +37,15 @@ internal class ConsentGate(
     private val sender: EventSender,
 ) {
 
-    // The application context keeps the file off whatever short lived context was handed in, and may be null when
+    // The application context keeps the files off whatever short lived context was handed in, and may be null when
     // the SDK is reached from Application.attachBaseContext, so fall back rather than crash the host app.
     private val appContext: Context = context.applicationContext ?: context
 
-    private val queueFile: File = File(appContext.noBackupFilesDir, FILE_NAME)
+    /** What is held while the state is `UNKNOWN`, oldest first. In memory only, never on disk. */
+    private val held = ArrayList<Event>()
+
+    /** Whether this process has reported a refusal from an install with no id. In memory only, never on disk. */
+    private var refusalReported = false
 
     /**
      * What the host app has said so far. `UNKNOWN` until [setConsent] is called, and events recorded in that state
@@ -60,7 +66,7 @@ internal class ConsentGate(
     internal fun record(event: Event): Unit = synchronized(this) {
         when (state) {
             ConsentState.UNKNOWN -> hold(event)
-            ConsentState.GRANTED -> sender.send(event.copy(consentStatus = ConsentState.GRANTED))
+            ConsentState.GRANTED -> send(event, InstallId.get(appContext))
             // Nothing is kept for a later change of mind. A person who refuses and then agrees is tracked from the
             // moment they agreed, which is the whole of what consent means.
             ConsentState.DENIED -> TraceLog.log("${event.type} dropped, consent was refused")
@@ -70,81 +76,99 @@ internal class ConsentGate(
     /**
      * Records the answer to the banner, tells the server, and then flushes or discards everything held.
      *
-     * The order is the consent call, then the held events oldest first, because the server takes the key for a
-     * replayed event from the consent call. The held events are stamped `GRANTED` as they go: the server treats the
-     * payload's `consent_status` as authoritative, so an event flushed by a grant that still said `UNKNOWN` would be
+     * A grant mints and writes the install id, if there is none yet, sends the consent call, then the held events
+     * oldest first. The held events are stamped `GRANTED` as they go: the server treats the payload's
+     * `consent_status` as authoritative, so an event flushed by a grant that still said `UNKNOWN` would be
      * quarantined after the person had already agreed, which from the outside looks exactly like never sending it.
      *
      * A refusal still sends the consent call, because that is what withdraws an earlier grant and purges what it
      * allowed, but only when this install already has an id. Minting one in order to report a refusal would create
      * the identifier the person has just declined.
      *
-     * The queue is gone from disk by the time this returns, flushed or discarded. A send the server did not take is
-     * not retried here: the transport has already tried three times, and a file that outlives the answer is a file
-     * some later launch sends again.
+     * Nothing is held by the time this returns, flushed or discarded. A send the server did not take is not retried
+     * here: the transport has already retried what was worth retrying.
      */
     internal fun setConsent(analytics: Boolean, marketing: Boolean): Unit = synchronized(this) {
         state = if (analytics) ConsentState.GRANTED else ConsentState.DENIED
-        val held = readHeld()
 
+        // The install's first answer is the grant that mints its id. Read before get can mint it.
+        val minting = analytics && InstallId.peek(appContext) == null
         // get on a grant, peek on a refusal: a refusal reports an identity that exists and never creates one.
         val key = if (analytics) InstallId.get(appContext) else InstallId.peek(appContext)
-        if (key == null) {
-            TraceLog.log("consent refused before this install had an identity, so there is nothing to withdraw")
+        if (key != null) {
+            sender.sendConsent(key, analytics, marketing, firstAnswer = minting)
+        } else if (!refusalReported && installedWithinADay()) {
+            // Counted, never identified: no key, and nothing written to remember it, because nothing may be written
+            // before a grant. So once a process, in the install's first day, when the banner is answered.
+            // ponytail: a refuser whose process restarts in the first day is counted again, and one who first answers
+            // after it is not counted. Exact needs one empty file written on a refusal, which the rules forbid today.
+            TraceLog.log("consent refused before this install had an identity, reporting the answer with no identifier")
+            refusalReported = sender.sendFirstRefusal(marketing)
         } else {
-            sender.sendConsent(key, analytics, marketing)
+            TraceLog.log("consent refused before this install had an identity, so there is nothing to withdraw")
         }
 
-        if (analytics) {
+        if (key != null && analytics) {
             TraceLog.log("consent granted, sending ${held.size} held event(s)")
-            held.forEach { sender.send(it.copy(consentStatus = ConsentState.GRANTED)) }
+            held.forEach { send(it, key) }
         } else {
             TraceLog.log("consent refused, discarding ${held.size} held event(s)")
         }
-        clearHeld()
+        held.clear()
+    }
+
+    // The Play Store's own record of when the app was first installed, read, never written. Unknown counts as old.
+    private fun installedWithinADay(): Boolean = runCatching {
+        val installed = appContext.packageManager.getPackageInfo(appContext.packageName, 0).firstInstallTime
+        installed > 0 && System.currentTimeMillis() - installed in 0L until DAY_MILLIS
+    }.getOrDefault(false)
+
+    // Stamped with the key and GRANTED here, because neither was known when the event was recorded. A first open sent
+    // with a wrong configuration (a wrong address, or an api key the API refused) certainly did not reach Trace, so it
+    // is not marked sent and the next launch sends it again, which reports the install once the app ships fixed.
+    private fun send(event: Event, key: String) {
+        val delivery = sender.send(event.copy(anonUserKey = key, consentStatus = ConsentState.GRANTED))
+        if (event.type != EventType.FIRST_OPEN) return
+        if (delivery == Delivery.WRONG_CONFIGURATION) {
+            TraceLog.log("the first open did not reach the Trace API, so the next launch sends it again")
+        } else {
+            recordFirstOpenSent(appContext)
+        }
     }
 
     private fun hold(event: Event) {
-        val held = readHeld().toMutableList()
         held.add(event)
         if (held.size > MAX_HELD) {
             val dropped = held.size - MAX_HELD
             repeat(dropped) { held.removeAt(0) }
-            // A banner nobody ever answers must not grow a file without limit, and when something has to go it is
+            // A banner nobody ever answers must not grow the queue without limit, and when something has to go it is
             // the oldest: the newest conversions are the ones still worth sending.
             TraceLog.log("the held queue is full at $MAX_HELD, dropped the $dropped oldest held event(s)")
         }
-        write(held)
-        TraceLog.log("${event.type} held until the consent state is known, ${held.size} now held")
+        TraceLog.log("${event.type} held in memory until the consent state is known, ${held.size} now held")
     }
 
-    // One event per line, in the body it would have been sent as. The whole file is rewritten rather than appended
-    // to: it is a hundred lines at most, and a rewrite is the same code as a drop. A write cut short by a process
-    // dying leaves a broken last line, which the reader drops, so the events before it still survive.
-    private fun write(held: List<Event>) {
-        val failure = runCatching { queueFile.writeText(held.joinToString(separator = "\n") { it.toJson() }) }
-        if (failure.isFailure) TraceLog.log("could not write the held queue, ${held.size} event(s) may be lost")
-    }
+    internal companion object {
 
-    private fun readHeld(): List<Event> =
-        runCatching { queueFile.readLines() }.getOrDefault(emptyList())
-            .mapNotNull { line -> if (line.isBlank()) null else Event.fromJson(line) }
+        private const val FIRST_OPEN_FLAG: String = "first_open_sent"
 
-    // Gone, not emptied. A denial that leaves the events in a file has not discarded them, and a flush that leaves
-    // them there sends them again on the next launch.
-    private fun clearHeld() {
-        val gone = runCatching { !queueFile.exists() || queueFile.delete() }.getOrDefault(false)
-        if (!gone) {
-            TraceLog.log("could not delete the held queue, emptying it instead")
-            runCatching { queueFile.writeText("") }
-        }
-    }
-
-    private companion object {
-
-        private const val FILE_NAME: String = "held_events"
-
-        /** The most events held at once. Past this the oldest goes, so an unanswered banner cannot fill a disk. */
+        /** The most events held at once. Past this the oldest goes, so an unanswered banner cannot fill memory. */
         private const val MAX_HELD: Int = 100
+
+        private const val DAY_MILLIS: Long = 24 * 60 * 60 * 1000L
+
+        /**
+         * The file that says the install was reported, in the directory Android never backs up: a flag restored onto
+         * a fresh install would suppress that install's first open, which cannot be sent again.
+         */
+        internal fun firstOpenFlag(context: Context): File = File(context.noBackupFilesDir, FIRST_OPEN_FLAG)
+
+        // Written after the first open has gone to the transport, not before: a flag written first would suppress an
+        // install that was never sent. It is written whether or not the server took it, because there is no retry
+        // across launches (see the class comment on Trace), except after a wrong configuration, which [send] skips.
+        private fun recordFirstOpenSent(context: Context) {
+            val kept = runCatching { firstOpenFlag(context).writeText(Event.nowIso8601()) }.isSuccess
+            if (!kept) TraceLog.log("could not record that the install was reported, so a later launch may report it again")
+        }
     }
 }

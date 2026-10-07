@@ -141,7 +141,7 @@ class FirstOpenEndToEndTest {
 
         launch(api)
 
-        // Both events were built while the state was UNKNOWN and held on disk in that form. The server treats the
+        // Both events were built while the state was UNKNOWN and held in memory in that form. The server treats the
         // payload's consent_status as authoritative and quarantines UNKNOWN on a UK or EU site, so an event
         // flushed by a grant that still said UNKNOWN would be held back after the person had already agreed. From
         // the outside that is indistinguishable from never having sent it, which is why this is asserted on the
@@ -157,6 +157,76 @@ class FirstOpenEndToEndTest {
                 it.getString("consent_status"),
             )
         }
+    }
+
+    private fun firstOpens(api: StubApi): Int =
+        api.requests.count { it.path == "/v1/event" && it.json().getString("event_type") == "FIRST_OPEN" }
+
+    /**
+     * An app shipped with a wrong address (the dashboard answers a POST with a web page and a 200) reports its
+     * installs once an update fixes the address, instead of having marked each one sent. Nothing new is written for
+     * it: the grant writes the install id as it always has, and the first open flag waits.
+     */
+    @Test
+    fun `a first open that reached a wrong address is sent again once the address is fixed`() {
+        val wrong = StubApi(200, 200, answer = "<!DOCTYPE html><html><body>Trace</body></html>")
+        launch(wrong)
+        wrong.stop()
+        assertEquals(1, firstOpens(wrong))
+        assertEquals(
+            "a first open that never reached Trace must not be marked sent, and nothing else is written for it",
+            listOf("install_id"),
+            context.noBackupFilesDir.listFiles().orEmpty().map { it.name }.sorted(),
+        )
+
+        Trace.resetForTest()
+        val fixed = StubApi().also { api = it }
+        launch(fixed)
+        assertEquals(1, firstOpens(fixed))
+        fixed.stop()
+
+        Trace.resetForTest()
+        val later = StubApi().also { api = it }
+        launch(later)
+        assertEquals("once delivered, the first open is not sent again", 0, firstOpens(later))
+    }
+
+    /** A wrong or revoked api key is the same: the first open never reached Trace, so a later launch sends it again. */
+    @Test
+    fun `a first open refused for its key is sent again once the key is fixed`() {
+        listOf(401, 403).forEach { status ->
+            context.noBackupFilesDir.listFiles().orEmpty().forEach { it.delete() }
+            Trace.resetForTest()
+            val refusing = StubApi(status, status)
+            launch(refusing)
+            refusing.stop()
+            assertEquals("$status", 1, firstOpens(refusing))
+            val written = context.noBackupFilesDir.listFiles().orEmpty().map { it.name }.sorted()
+            assertEquals("$status", listOf("install_id"), written)
+
+            Trace.resetForTest()
+            val fixed = StubApi().also { api = it }
+            launch(fixed)
+            assertEquals("$status", 1, firstOpens(fixed))
+            fixed.stop()
+        }
+    }
+
+    /**
+     * The rule the cases above are the exception to: a first open the transport gave up on for any other reason is
+     * still marked sent, because the server may have taken it and there is no retry across launches.
+     */
+    @Test
+    fun `a first open that failed for any other reason is not sent again`() {
+        val broken = StubApi(eventStatus = 500)
+        launch(broken)
+        broken.stop()
+        assertEquals(3, firstOpens(broken))
+
+        Trace.resetForTest()
+        val fixed = StubApi().also { api = it }
+        launch(fixed)
+        assertEquals(0, firstOpens(fixed))
     }
 
     @Test

@@ -35,8 +35,8 @@ class TransportTest {
         TraceLog.redirect(null)
     }
 
-    private fun stub(eventStatus: Int = 202, consentStatus: Int = 201, delayMillis: Long = 0): StubApi =
-        StubApi(eventStatus, consentStatus, delayMillis).also { api = it }
+    private fun stub(eventStatus: Int = 202, consentStatus: Int = 201, delayMillis: Long = 0, body: String? = null) =
+        StubApi(eventStatus, consentStatus, delayMillis, body).also { api = it }
 
     private fun transport(url: String, timeoutMillis: Int = 10_000) =
         Transport(apiKey = "trace_pk_test", apiUrl = url, timeoutMillis = timeoutMillis)
@@ -49,12 +49,49 @@ class TransportTest {
         installReferrer = referrer,
     )
 
+    /**
+     * The README's "What to declare to the stores" says what leaves the device, for the Play Data safety form. This
+     * is that list, read off the wire with every field filled in. A field added to an event or to the consent call
+     * fails here until the README says what it is and this list names it.
+     */
+    @Test
+    fun `every field that leaves the device is one the store declarations name`() {
+        val declared = setOf(
+            // The install id, and what kind of client sent it.
+            "anon_user_key", "source_type", "platform", "store",
+            // The event: what happened, when, under which consent answer, on which version of the app, and for a
+            // first open the Play Store install referrer.
+            "event_type", "timestamp", "consent_status", "app_version", "install_referrer",
+            // A conversion: the app's name for it, its value and its metadata. The SDK never fills in the two
+            // conversion_ fields today; they are named so that starting to send them is still a change seen here.
+            "event_name", "value", "metadata", "conversion_type_id", "conversion_value",
+            // The consent call: the two answers, and whether this is the install's first answer.
+            "consent_analytics", "consent_marketing", "first_answer",
+        )
+        val api = stub()
+        val transport = transport(api.url)
+
+        transport.send(
+            firstOpen().copy(
+                eventName = "purchase",
+                value = 1.0,
+                conversionTypeId = "ct",
+                conversionValue = 1.0,
+                metadata = mapOf("plan" to "plus"),
+            ),
+        )
+        transport.sendConsent(key, analytics = true, marketing = false, firstAnswer = true)
+
+        assertEquals(2, api.requests.size)
+        assertEquals(declared, api.requests.flatMap { it.json().keys().asSequence().toList() }.toSet())
+    }
+
     @Test
     fun `the api key travels on the event and on the consent call`() {
         val api = stub()
         val transport = transport(api.url)
 
-        assertTrue(transport.send(firstOpen()))
+        assertEquals(Delivery.DELIVERED, transport.send(firstOpen()))
         assertTrue(transport.sendConsent(key, analytics = true, marketing = false))
 
         assertEquals(2, api.requests.size)
@@ -131,6 +168,51 @@ class TransportTest {
         assertFalse(body.getBoolean("consent_marketing"))
     }
 
+    /**
+     * Decided 7 October 2026 (decision 3 of docs/plans/APP_MODELLED_INSTALLS.md in use-trace/trace): the share of
+     * people who said yes is worked out per platform, so the consent call says which platform answered. A refusal
+     * carries it too, because a no is half of that share.
+     */
+    @Test
+    fun `a consent call says it is from an android app`() {
+        val api = stub()
+
+        transport(api.url).sendConsent(key, analytics = false, marketing = false)
+
+        assertEquals("android", api.requests.single().json().getString("platform"))
+    }
+
+    @Test
+    fun `a consent call says whether it is the install's first answer`() {
+        val api = stub()
+        val transport = transport(api.url)
+
+        transport.sendConsent(key, analytics = true, marketing = false, firstAnswer = true)
+        transport.sendConsent(key, analytics = true, marketing = false, firstAnswer = false)
+
+        assertEquals(listOf(true, false), api.requests.map { it.json().getBoolean("first_answer") })
+    }
+
+    /** A refusal from an install with no id is counted, never identified: no key, nothing else that could be one. */
+    @Test
+    fun `a first refusal carries no identifier`() {
+        val api = stub()
+
+        assertTrue(transport(api.url).sendFirstRefusal(marketing = true))
+
+        val request = api.requests.single()
+        assertEquals("/v1/consent", request.path)
+        val body = request.json()
+        assertEquals(
+            setOf("consent_analytics", "consent_marketing", "timestamp", "platform", "first_answer"),
+            body.keys().asSequence().toSet(),
+        )
+        assertFalse(body.getBoolean("consent_analytics"))
+        assertTrue(body.getBoolean("consent_marketing"))
+        assertTrue(body.getBoolean("first_answer"))
+        assertEquals("android", body.getString("platform"))
+    }
+
     @Test
     fun `a first open sends the referrer byte for byte`() {
         val api = stub()
@@ -171,7 +253,7 @@ class TransportTest {
 
         // POST /v1/event answers 202 and POST /v1/consent answers 201. A transport that only accepted 200 would
         // report every successful send as a failure, and the consent gate would hold events that had arrived.
-        assertTrue("202 Accepted is what the event route answers", transport.send(firstOpen()))
+        assertEquals("202 Accepted is what the event route answers", Delivery.DELIVERED, transport.send(firstOpen()))
         assertTrue("201 Created is what the consent route answers", transport.sendConsent(key, true, false))
     }
 
@@ -179,34 +261,119 @@ class TransportTest {
     fun `a plain 200 is a success too`() {
         val api = stub(eventStatus = 200)
 
-        assertTrue(transport(api.url).send(firstOpen()))
+        assertEquals(Delivery.DELIVERED, transport(api.url).send(firstOpen()))
+    }
+
+    /**
+     * 7 October 2026: the default address reached the dashboard, which answers a POST with a web page and a 200, and
+     * every event was counted as delivered and lost. A 2xx that is not the API's answer is a wrong address: not
+     * delivered, not retried, and logged once, with logging off, because that is the developer who needs to hear it.
+     */
+    @Test
+    fun `a 200 web page is not delivered, is not retried and is logged once with logging off`() {
+        val lines = CopyOnWriteArrayList<String>()
+        TraceLog.redirect { lines.add(it) }
+        val api = stub(eventStatus = 200, consentStatus = 200, body = "<!DOCTYPE html><html><body>Trace</body></html>")
+        val transport = transport(api.url)
+
+        assertEquals(Delivery.WRONG_CONFIGURATION, transport.send(firstOpen()))
+        assertEquals(Delivery.WRONG_CONFIGURATION, transport.send(firstOpen()))
+        assertFalse(transport.sendConsent(key, analytics = true, marketing = false))
+
+        assertEquals("a wrong address stays wrong, so it is not retried", 3, api.requests.size)
+        assertEquals(1, lines.size)
+        assertTrue(lines.single(), "check the configured api url" in lines.single())
+    }
+
+    @Test
+    fun `a 202 with accepted true is delivered`() {
+        listOf(
+            "{\"accepted\":true}",
+            "{\"accepted\":true,\"buffered\":true,\"request_id\":\"req_placeholder\"}",
+            "{\"accepted\":true,\"ignored\":true,\"reason\":\"ip_excluded\"}",
+        ).forEach { body ->
+            val api = stub(body = body)
+            assertEquals(body, Delivery.DELIVERED, transport(api.url).send(firstOpen()))
+            assertEquals(body, 1, api.requests.size)
+            api.stop()
+        }
+    }
+
+    @Test
+    fun `a 201 with the consent answer is delivered`() {
+        listOf(
+            "{\"anon_user_key\":null,\"cookie_set\":false,\"journey_ref\":null}",
+            "{\"anon_user_key\":null,\"cookie_set\":false,\"ignored\":true,\"reason\":\"ip_excluded\"}",
+        ).forEach { body ->
+            val api = stub(body = body)
+            assertTrue(body, transport(api.url).sendConsent(key, analytics = false, marketing = false))
+            assertEquals(body, 1, api.requests.size)
+            api.stop()
+        }
+    }
+
+    // Each route is held to its own answer, so the event's answer does not pass for the consent call's.
+    @Test
+    fun `a 2xx with other json is not delivered on the event route`() {
+        listOf(
+            "", "{}", "[]", "null", "{\"ok\":true}", "{\"accepted\":false}", "{\"accepted\":\"true\"}",
+            "{\"cookie_set\":true}",
+        ).forEach { body ->
+            val api = stub(body = body)
+            assertEquals(body, Delivery.WRONG_CONFIGURATION, transport(api.url).send(firstOpen()))
+            assertEquals(body, 1, api.requests.size)
+            api.stop()
+        }
+    }
+
+    @Test
+    fun `a 2xx with other json is not delivered on the consent route`() {
+        listOf("", "{}", "[]", "{\"ok\":true}", "{\"accepted\":true}", "{\"cookie_set\":\"true\"}").forEach { body ->
+            val api = stub(body = body)
+            assertFalse(body, transport(api.url).sendConsent(key, analytics = true, marketing = false))
+            assertEquals(body, 1, api.requests.size)
+            api.stop()
+        }
     }
 
     @Test
     fun `a 400 is a failure and is not retried`() {
         val api = stub(eventStatus = 400)
 
-        assertFalse(transport(api.url).send(firstOpen()))
+        assertEquals(Delivery.FAILED, transport(api.url).send(firstOpen()))
 
         // A rejected payload is rejected again. Retrying it is noise that looks like a flaky network, and it is the
         // same refusal three times over on someone else's data allowance.
         assertEquals("a refused payload must be sent once and once only", 1, api.requests.size)
     }
 
+    /**
+     * A wrong or revoked api key is a wrong configuration like a wrong address: not retried, said once with logging
+     * off, and reported apart from a failure so the consent gate sends the first open again on a later launch.
+     */
     @Test
-    fun `a 401 is not retried either`() {
-        val api = stub(eventStatus = 401)
+    fun `a 401 or 403 is a wrong configuration, is not retried and is logged once with logging off`() {
+        listOf(401, 403).forEach { status ->
+            val lines = CopyOnWriteArrayList<String>()
+            TraceLog.redirect { lines.add(it) }
+            val api = stub(eventStatus = status)
+            val transport = transport(api.url)
 
-        assertFalse(transport(api.url).send(firstOpen()))
+            assertEquals("$status", Delivery.WRONG_CONFIGURATION, transport.send(firstOpen()))
+            assertEquals("$status", Delivery.WRONG_CONFIGURATION, transport.send(firstOpen()))
 
-        assertEquals("a wrong api key will be wrong on the second attempt as well", 1, api.requests.size)
+            assertEquals("a wrong api key will be wrong on the second attempt as well", 2, api.requests.size)
+            assertEquals("$status", 1, lines.size)
+            assertTrue(lines.single(), "check the api key" in lines.single())
+            api.stop()
+        }
     }
 
     @Test
     fun `a 500 is retried, three attempts in total`() {
         val api = stub(eventStatus = 500)
 
-        assertFalse(transport(api.url).send(firstOpen()))
+        assertEquals(Delivery.FAILED, transport(api.url).send(firstOpen()))
 
         assertEquals("a server error is worth another try, but not forever", 3, api.requests.size)
     }
@@ -216,7 +383,7 @@ class TransportTest {
         val api = stub(eventStatus = 500)
         api.statusAfterFirst = 202
 
-        assertTrue(transport(api.url).send(firstOpen()))
+        assertEquals(Delivery.DELIVERED, transport(api.url).send(firstOpen()))
 
         assertEquals(2, api.requests.size)
     }
@@ -227,26 +394,26 @@ class TransportTest {
         // an answer whatever the network did.
         val deadPort = ServerSocket(0).use { it.localPort }
 
-        assertFalse(transport("http://127.0.0.1:$deadPort").send(firstOpen()))
+        assertEquals(Delivery.FAILED, transport("http://127.0.0.1:$deadPort").send(firstOpen()))
     }
 
     @Test
     fun `a host that does not resolve returns false rather than throwing`() {
-        assertFalse(transport("http://api.usetrace.invalid").send(firstOpen()))
+        assertEquals(Delivery.FAILED, transport("http://api.usetrace.invalid").send(firstOpen()))
     }
 
     @Test
     fun `a server that never answers times out and returns false`() {
         val api = stub(delayMillis = 1_000)
 
-        assertFalse(transport(api.url, timeoutMillis = 150).send(firstOpen()))
+        assertEquals(Delivery.FAILED, transport(api.url, timeoutMillis = 150).send(firstOpen()))
     }
 
     @Test
     fun `a malformed api url returns false rather than throwing`() {
         // A typo in the customer's own configuration. It is not retried either: it will be malformed next time.
-        assertFalse(transport("not a url at all").send(firstOpen()))
-        assertFalse(transport("telnet://127.0.0.1:1").send(firstOpen()))
+        assertEquals(Delivery.WRONG_CONFIGURATION, transport("not a url at all").send(firstOpen()))
+        assertEquals(Delivery.WRONG_CONFIGURATION, transport("telnet://127.0.0.1:1").send(firstOpen()))
         assertFalse(transport("").sendConsent(key, true, false))
     }
 

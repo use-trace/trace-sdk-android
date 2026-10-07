@@ -85,7 +85,7 @@ says so in logcat: the install happened once.
 | Parameter | Default | What it is |
 | --- | --- | --- |
 | `apiKey` | required | The site's api key, sent as `x-trace-api-key`. |
-| `apiUrl` | `https://app.usetrace.io` | Where to send. Change it only for a self hosted deployment. |
+| `apiUrl` | `https://app.usetrace.io/api-proxy` | Where to send. Change it only for a self hosted deployment. |
 | `debugLogging` | `false` | Whether the SDK writes what it is doing to logcat under the tag `Trace`. |
 
 `debugLogging` never writes an install id, a referrer or an event's contents, whatever it is set to: those are
@@ -208,7 +208,7 @@ account id, no location, no contacts, no device model and no list of installed a
 **Does your app collect or share any of the required user data types?** Yes.
 
 **Is all of the user data collected by your app encrypted in transit?** Yes, as long as `apiUrl` is an `https`
-address, which the default `https://app.usetrace.io` is (`TraceConfig.kt`). A self hosted `http` address would not
+address, which the default `https://app.usetrace.io/api-proxy` is (`TraceConfig.kt`). A self hosted `http` address would not
 be, and Android blocks one by default for apps targeting Android 9 or later.
 
 **Do you provide a way for users to request that their data is deleted?** Trace deletes everything it holds for

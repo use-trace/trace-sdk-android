@@ -9,6 +9,7 @@ import org.junit.Test
 import org.junit.runner.RunWith
 import org.robolectric.RobolectricTestRunner
 import org.robolectric.RuntimeEnvironment
+import org.robolectric.Shadows.shadowOf
 
 /**
  * The consent gate, against a fake [EventSender] that records the order of what it was asked to send.
@@ -45,6 +46,7 @@ class ConsentGateTest {
         val calls = mutableListOf<String>()
         val events = mutableListOf<Event>()
         val consentKeys = mutableListOf<String>()
+        val firstAnswers = mutableListOf<Boolean>()
         var accepts: Boolean = true
 
         override fun send(event: Event): Boolean {
@@ -53,9 +55,16 @@ class ConsentGateTest {
             return accepts
         }
 
-        override fun sendConsent(key: String, analytics: Boolean, marketing: Boolean): Boolean {
+        override fun sendConsent(key: String, analytics: Boolean, marketing: Boolean, firstAnswer: Boolean): Boolean {
             calls.add("consent analytics=$analytics marketing=$marketing")
             consentKeys.add(key)
+            firstAnswers.add(firstAnswer)
+            return accepts
+        }
+
+        override fun sendFirstRefusal(marketing: Boolean): Boolean {
+            calls.add("first refusal marketing=$marketing")
+            firstAnswers.add(true)
             return accepts
         }
     }
@@ -155,17 +164,72 @@ class ConsentGateTest {
         assertEquals(emptyList<Event>(), sender.events)
     }
 
+    /** Sets when the Play Store says this app was first installed, which is all the SDK reads to judge its age. */
+    private fun installedHoursAgo(hours: Long) {
+        shadowOf(context.packageManager).getInternalMutablePackageInfo(context.packageName).firstInstallTime =
+            System.currentTimeMillis() - hours * 3_600_000
+    }
+
     @Test
     fun `a denial before there is any identity mints none to announce itself`() {
+        installedHoursAgo(25)
         val sender = RecordingSender()
         val gate = gate(sender)
 
         gate.setConsent(analytics = false, marketing = false)
 
         // Nothing has been recorded, so there is no install id and nothing the server could withdraw. Minting one
-        // in order to report a refusal would create the identifier the person has just declined.
+        // in order to report a refusal would create the identifier the person has just declined. And the install is
+        // over a day old, so the refusal is not counted either.
         assertEquals(emptyList<String>(), sender.calls)
         assertEquals(null, InstallId.peek(context))
+    }
+
+    /**
+     * Decided 7 October 2026 (decision 3 of APP_MODELLED_INSTALLS.md in use-trace/trace): the share who said yes
+     * counts each install's answer once. A refusal from an install with no id is reported with no identifier, and,
+     * because nothing may be written to remember it, at most once per process and only in the install's first day.
+     */
+    @Test
+    fun `a first day refusal is reported once a process with no identifier, and writes nothing`() {
+        installedHoursAgo(1)
+        val sender = RecordingSender()
+        val gate = gate(sender)
+
+        gate.setConsent(analytics = false, marketing = true)
+        gate.setConsent(analytics = false, marketing = true)
+
+        assertEquals(listOf("first refusal marketing=true"), sender.calls)
+        assertEquals(emptyList<String>(), sender.consentKeys)
+        assertEquals(null, InstallId.peek(context))
+        assertEquals("a refusal may write nothing at all", emptyList<String>(), written())
+    }
+
+    @Test
+    fun `a first refusal the server did not take is tried again in the same process`() {
+        installedHoursAgo(1)
+        val sender = RecordingSender().apply { accepts = false }
+        val gate = gate(sender)
+
+        gate.setConsent(analytics = false, marketing = false)
+        sender.accepts = true
+        gate.setConsent(analytics = false, marketing = false)
+        gate.setConsent(analytics = false, marketing = false)
+
+        assertEquals(listOf("first refusal marketing=false", "first refusal marketing=false"), sender.calls)
+    }
+
+    @Test
+    fun `the grant that mints the install id is the first answer and every later call is not`() {
+        val sender = RecordingSender()
+        val gate = gate(sender)
+        gate.setConsent(analytics = true, marketing = false)
+        gate.setConsent(analytics = false, marketing = false)
+        val later = RecordingSender()
+        gate(later).setConsent(analytics = true, marketing = false)
+
+        assertEquals("a withdrawal is never a first answer", listOf(true, false), sender.firstAnswers)
+        assertEquals(listOf(false), later.firstAnswers)
     }
 
     @Test

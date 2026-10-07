@@ -77,9 +77,10 @@ which task built each file.
 Kotlin, Gradle, compileSdk and LTS JDK, applied to a throwaway checkout. A failure opens one `incident` issue titled
 "Newest toolchain run is failing" and alerts, through a copy of the monorepo's shared recorder (a public repository
 cannot call a workflow in a private one); the next pass closes it. It means the pinned versions are about to stop
-working for a customer on the newest tools, not that `main` is broken. `main` is on Android Gradle plugin 9, which compiles Kotlin
-itself and refuses the Kotlin Android plugin in a module: `trace` applies none, and the root declares it with
-`apply false` only to choose the Kotlin version.
+working for a customer on the newest tools, not that `main` is broken. `main` is on Android Gradle plugin 9 with its built in Kotlin
+turned off (`android.builtInKotlin=false` and `android.newDsl=false` in `gradle.properties`), because the binary
+compatibility validator behind `api` only attaches to the Kotlin Android plugin. Plugin 10 removes those switches:
+moving to it means moving `api` to the Kotlin plugin's own ABI validation and deleting the Kotlin Android plugin.
 
 `privacy` is `scripts/check-privacy.sh`: the rules above, as a check. The README's "What to declare to the stores"
 is what customers put in the Play Data safety form, so sending a new field changes it in the same pull request;

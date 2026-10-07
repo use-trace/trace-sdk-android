@@ -65,8 +65,8 @@ class TransportTest {
             // A conversion: the app's name for it, its value and its metadata. The SDK never fills in the two
             // conversion_ fields today; they are named so that starting to send them is still a change seen here.
             "event_name", "value", "metadata", "conversion_type_id", "conversion_value",
-            // The consent call: the two answers.
-            "consent_analytics", "consent_marketing",
+            // The consent call: the two answers, and whether this is the install's first answer.
+            "consent_analytics", "consent_marketing", "first_answer",
         )
         val api = stub()
         val transport = transport(api.url)
@@ -80,7 +80,7 @@ class TransportTest {
                 metadata = mapOf("plan" to "plus"),
             ),
         )
-        transport.sendConsent(key, analytics = true, marketing = false)
+        transport.sendConsent(key, analytics = true, marketing = false, firstAnswer = true)
 
         assertEquals(2, api.requests.size)
         assertEquals(declared, api.requests.flatMap { it.json().keys().asSequence().toList() }.toSet())
@@ -180,6 +180,37 @@ class TransportTest {
         transport(api.url).sendConsent(key, analytics = false, marketing = false)
 
         assertEquals("android", api.requests.single().json().getString("platform"))
+    }
+
+    @Test
+    fun `a consent call says whether it is the install's first answer`() {
+        val api = stub()
+        val transport = transport(api.url)
+
+        transport.sendConsent(key, analytics = true, marketing = false, firstAnswer = true)
+        transport.sendConsent(key, analytics = true, marketing = false, firstAnswer = false)
+
+        assertEquals(listOf(true, false), api.requests.map { it.json().getBoolean("first_answer") })
+    }
+
+    /** A refusal from an install with no id is counted, never identified: no key, nothing else that could be one. */
+    @Test
+    fun `a first refusal carries no identifier`() {
+        val api = stub()
+
+        assertTrue(transport(api.url).sendFirstRefusal(marketing = true))
+
+        val request = api.requests.single()
+        assertEquals("/v1/consent", request.path)
+        val body = request.json()
+        assertEquals(
+            setOf("consent_analytics", "consent_marketing", "timestamp", "platform", "first_answer"),
+            body.keys().asSequence().toSet(),
+        )
+        assertFalse(body.getBoolean("consent_analytics"))
+        assertTrue(body.getBoolean("consent_marketing"))
+        assertTrue(body.getBoolean("first_answer"))
+        assertEquals("android", body.getString("platform"))
     }
 
     @Test

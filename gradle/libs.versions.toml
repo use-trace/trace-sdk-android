@@ -1,7 +1,7 @@
 [versions]
 # Android Gradle Plugin 8.7 is the pairing for Gradle 8.9, which the wrapper pins.
 agp = "8.7.3"
-kotlin = "2.0.21"
+kotlin = "2.4.20"
 # The only runtime dependency this SDK is allowed. Nothing else can read the Play Store install referrer.
 installreferrer = "2.2"
 junit = "4.13.2"
@@ -9,6 +9,9 @@ junit = "4.13.2"
 robolectric = "4.17"
 # Writes the public API to trace/api/trace.api and fails the build when the two disagree.
 bcv = "0.16.3"
+# Publishes to Maven Central through the Central Portal, signed, with sources and javadoc jars. 0.35 and later need
+# Gradle 8.13 or 9, so moving past 0.34 moves the wrapper with it.
+maven-publish = "0.34.0"
 
 [libraries]
 installreferrer = { module = "com.android.installreferrer:installreferrer", version.ref = "installreferrer" }
@@ -19,3 +22,4 @@ robolectric = { module = "org.robolectric:robolectric", version.ref = "robolectr
 android-library = { id = "com.android.library", version.ref = "agp" }
 kotlin-android = { id = "org.jetbrains.kotlin.android", version.ref = "kotlin" }
 binary-compatibility-validator = { id = "org.jetbrains.kotlinx.binary-compatibility-validator", version.ref = "bcv" }
+maven-publish = { id = "com.vanniktech.maven.publish", version.ref = "maven-publish" }

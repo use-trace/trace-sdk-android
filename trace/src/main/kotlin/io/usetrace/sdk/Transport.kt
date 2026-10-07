@@ -86,7 +86,7 @@ internal class Transport(
         )
 
     override fun sendFirstRefusal(marketing: Boolean): Boolean =
-        postConsent("consent_analytics" to false, "consent_marketing" to marketing, "first_answer" to true)
+        postConsent("consent_analytics" to false, "consent_marketing" to marketing, "first_answer" to true, "anon_user_key" to "")
 
     // The share of people who said yes is worked out per platform, counting each install's answer once by
     // first_answer (decision 3 of APP_MODELLED_INSTALLS.md in use-trace/trace).

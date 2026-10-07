@@ -91,7 +91,7 @@ class TransportTest {
         val api = stub()
         val transport = transport(api.url)
 
-        assertTrue(transport.send(firstOpen()))
+        assertEquals(Delivery.DELIVERED, transport.send(firstOpen()))
         assertTrue(transport.sendConsent(key, analytics = true, marketing = false))
 
         assertEquals(2, api.requests.size)
@@ -253,7 +253,7 @@ class TransportTest {
 
         // POST /v1/event answers 202 and POST /v1/consent answers 201. A transport that only accepted 200 would
         // report every successful send as a failure, and the consent gate would hold events that had arrived.
-        assertTrue("202 Accepted is what the event route answers", transport.send(firstOpen()))
+        assertEquals("202 Accepted is what the event route answers", Delivery.DELIVERED, transport.send(firstOpen()))
         assertTrue("201 Created is what the consent route answers", transport.sendConsent(key, true, false))
     }
 
@@ -261,7 +261,7 @@ class TransportTest {
     fun `a plain 200 is a success too`() {
         val api = stub(eventStatus = 200)
 
-        assertTrue(transport(api.url).send(firstOpen()))
+        assertEquals(Delivery.DELIVERED, transport(api.url).send(firstOpen()))
     }
 
     /**
@@ -276,8 +276,8 @@ class TransportTest {
         val api = stub(eventStatus = 200, consentStatus = 200, body = "<!DOCTYPE html><html><body>Trace</body></html>")
         val transport = transport(api.url)
 
-        assertFalse(transport.send(firstOpen()))
-        assertFalse(transport.send(firstOpen()))
+        assertEquals(Delivery.WRONG_CONFIGURATION, transport.send(firstOpen()))
+        assertEquals(Delivery.WRONG_CONFIGURATION, transport.send(firstOpen()))
         assertFalse(transport.sendConsent(key, analytics = true, marketing = false))
 
         assertEquals("a wrong address stays wrong, so it is not retried", 3, api.requests.size)
@@ -293,7 +293,7 @@ class TransportTest {
             "{\"accepted\":true,\"ignored\":true,\"reason\":\"ip_excluded\"}",
         ).forEach { body ->
             val api = stub(body = body)
-            assertTrue(body, transport(api.url).send(firstOpen()))
+            assertEquals(body, Delivery.DELIVERED, transport(api.url).send(firstOpen()))
             assertEquals(body, 1, api.requests.size)
             api.stop()
         }
@@ -320,7 +320,7 @@ class TransportTest {
             "{\"cookie_set\":true}",
         ).forEach { body ->
             val api = stub(body = body)
-            assertFalse(body, transport(api.url).send(firstOpen()))
+            assertEquals(body, Delivery.WRONG_CONFIGURATION, transport(api.url).send(firstOpen()))
             assertEquals(body, 1, api.requests.size)
             api.stop()
         }
@@ -340,27 +340,40 @@ class TransportTest {
     fun `a 400 is a failure and is not retried`() {
         val api = stub(eventStatus = 400)
 
-        assertFalse(transport(api.url).send(firstOpen()))
+        assertEquals(Delivery.FAILED, transport(api.url).send(firstOpen()))
 
         // A rejected payload is rejected again. Retrying it is noise that looks like a flaky network, and it is the
         // same refusal three times over on someone else's data allowance.
         assertEquals("a refused payload must be sent once and once only", 1, api.requests.size)
     }
 
+    /**
+     * A wrong or revoked api key is a wrong configuration like a wrong address: not retried, said once with logging
+     * off, and reported apart from a failure so the consent gate sends the first open again on a later launch.
+     */
     @Test
-    fun `a 401 is not retried either`() {
-        val api = stub(eventStatus = 401)
+    fun `a 401 or 403 is a wrong configuration, is not retried and is logged once with logging off`() {
+        listOf(401, 403).forEach { status ->
+            val lines = CopyOnWriteArrayList<String>()
+            TraceLog.redirect { lines.add(it) }
+            val api = stub(eventStatus = status)
+            val transport = transport(api.url)
 
-        assertFalse(transport(api.url).send(firstOpen()))
+            assertEquals("$status", Delivery.WRONG_CONFIGURATION, transport.send(firstOpen()))
+            assertEquals("$status", Delivery.WRONG_CONFIGURATION, transport.send(firstOpen()))
 
-        assertEquals("a wrong api key will be wrong on the second attempt as well", 1, api.requests.size)
+            assertEquals("a wrong api key will be wrong on the second attempt as well", 2, api.requests.size)
+            assertEquals("$status", 1, lines.size)
+            assertTrue(lines.single(), "check the api key" in lines.single())
+            api.stop()
+        }
     }
 
     @Test
     fun `a 500 is retried, three attempts in total`() {
         val api = stub(eventStatus = 500)
 
-        assertFalse(transport(api.url).send(firstOpen()))
+        assertEquals(Delivery.FAILED, transport(api.url).send(firstOpen()))
 
         assertEquals("a server error is worth another try, but not forever", 3, api.requests.size)
     }
@@ -370,7 +383,7 @@ class TransportTest {
         val api = stub(eventStatus = 500)
         api.statusAfterFirst = 202
 
-        assertTrue(transport(api.url).send(firstOpen()))
+        assertEquals(Delivery.DELIVERED, transport(api.url).send(firstOpen()))
 
         assertEquals(2, api.requests.size)
     }
@@ -381,26 +394,26 @@ class TransportTest {
         // an answer whatever the network did.
         val deadPort = ServerSocket(0).use { it.localPort }
 
-        assertFalse(transport("http://127.0.0.1:$deadPort").send(firstOpen()))
+        assertEquals(Delivery.FAILED, transport("http://127.0.0.1:$deadPort").send(firstOpen()))
     }
 
     @Test
     fun `a host that does not resolve returns false rather than throwing`() {
-        assertFalse(transport("http://api.usetrace.invalid").send(firstOpen()))
+        assertEquals(Delivery.FAILED, transport("http://api.usetrace.invalid").send(firstOpen()))
     }
 
     @Test
     fun `a server that never answers times out and returns false`() {
         val api = stub(delayMillis = 1_000)
 
-        assertFalse(transport(api.url, timeoutMillis = 150).send(firstOpen()))
+        assertEquals(Delivery.FAILED, transport(api.url, timeoutMillis = 150).send(firstOpen()))
     }
 
     @Test
     fun `a malformed api url returns false rather than throwing`() {
         // A typo in the customer's own configuration. It is not retried either: it will be malformed next time.
-        assertFalse(transport("not a url at all").send(firstOpen()))
-        assertFalse(transport("telnet://127.0.0.1:1").send(firstOpen()))
+        assertEquals(Delivery.WRONG_CONFIGURATION, transport("not a url at all").send(firstOpen()))
+        assertEquals(Delivery.WRONG_CONFIGURATION, transport("telnet://127.0.0.1:1").send(firstOpen()))
         assertFalse(transport("").sendConsent(key, true, false))
     }
 

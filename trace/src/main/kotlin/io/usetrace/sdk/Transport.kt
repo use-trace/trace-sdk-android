@@ -15,10 +15,26 @@ import java.util.concurrent.atomic.AtomicBoolean
  * thing it stands for is broken. Internal, like everything else here: a customer gets no transport API and cannot
  * replace the network layer.
  */
+/** What became of one event. */
+internal enum class Delivery {
+    /** The Trace API said it took it. */
+    DELIVERED,
+
+    /** Refused, unreachable, or a server error that outlasted the retries. The server may have taken it. */
+    FAILED,
+
+    /**
+     * The configuration is wrong: the api url is not the Trace API (not a url, not http, or a 2xx without the API's
+     * answer), or the API refused the api key with a 401 or 403. The event certainly did not reach Trace, so the
+     * consent gate does not mark a first open sent.
+     */
+    WRONG_CONFIGURATION,
+}
+
 internal interface EventSender {
 
-    /** Sends one event, returning whether the server took it. Never throws. */
-    fun send(event: Event): Boolean
+    /** Sends one event, saying what became of it. Never throws. */
+    fun send(event: Event): Delivery
 
     /**
      * Sends the consent answers under [key], returning whether the server took them. Never throws.
@@ -71,16 +87,15 @@ internal class Transport(
     private val warned = AtomicBoolean(false)
 
     /**
-     * Sends one event to `POST /v1/event` and returns whether the server took it.
+     * Sends one event to `POST /v1/event` and says what became of it.
      *
-     * True means a 2xx with `"accepted": true`. False means the server refused it, could not be reached, or was not
-     * the Trace API, and the caller still holds the only copy: nothing here retries a 4xx, because a payload the
-     * server rejected it will reject again.
+     * [Delivery.DELIVERED] means a 2xx with `"accepted": true`. Anything else leaves the caller holding the only
+     * copy: nothing here retries a 4xx, because a payload the server rejected it will reject again.
      */
-    override fun send(event: Event): Boolean {
-        val accepted = post("/v1/event", event.toJson())
-        TraceLog.log("${event.type} ${if (accepted) "accepted" else "not accepted"}")
-        return accepted
+    override fun send(event: Event): Delivery {
+        val delivery = post("/v1/event", event.toJson())
+        TraceLog.log("${event.type} ${if (delivery == Delivery.DELIVERED) "accepted" else "not accepted"}")
+        return delivery
     }
 
     /**
@@ -106,36 +121,36 @@ internal class Transport(
     // first_answer (decision 3 of APP_MODELLED_INSTALLS.md in use-trace/trace).
     private fun postConsent(vararg answer: Pair<String, Any?>): Boolean {
         val body = Json.obj(*answer, "timestamp" to Event.nowIso8601(), "platform" to "android")
-        val accepted = post("/v1/consent", body)
+        val accepted = post("/v1/consent", body) == Delivery.DELIVERED
         TraceLog.log("consent ${if (accepted) "accepted" else "not accepted"}")
         return accepted
     }
 
-    private fun post(path: String, body: String): Boolean {
+    private fun post(path: String, body: String): Delivery {
         // Built once, outside the retry loop: a url the SDK cannot parse will not parse on a second attempt either.
         val url = runCatching { URL(baseUrl + path) }.getOrNull()
         if (url == null) {
             TraceLog.log("cannot send $path: the configured api url is not a url")
-            return false
+            return Delivery.WRONG_CONFIGURATION
         }
 
         var attempt = 1
         while (true) {
             val outcome = attempt(url, path, body)
-            if (outcome.accepted) return true
+            if (outcome.delivery == Delivery.DELIVERED) return Delivery.DELIVERED
             if (!outcome.worthRetrying || attempt == ATTEMPTS) {
                 TraceLog.log("$path failed on attempt $attempt of $ATTEMPTS, ${outcome.reason}, giving up")
-                return false
+                return outcome.delivery
             }
             TraceLog.log("$path attempt $attempt of $ATTEMPTS failed, ${outcome.reason}, trying again")
             // A short backoff, because the caller may be holding the one copy of an install that cannot be sent
             // again, and a long one on a background thread outlives the launch it belongs to.
-            if (!sleep(BACKOFF_MILLIS * attempt)) return false
+            if (!sleep(BACKOFF_MILLIS * attempt)) return Delivery.FAILED
             attempt++
         }
     }
 
-    private class Outcome(val accepted: Boolean, val worthRetrying: Boolean, val reason: String)
+    private class Outcome(val delivery: Delivery, val worthRetrying: Boolean, val reason: String)
 
     private fun attempt(url: URL, path: String, body: String): Outcome {
         var connection: HttpURLConnection? = null
@@ -163,31 +178,39 @@ internal class Transport(
 
             when {
                 status in 200..299 && isTraceAnswer(answer, path) ->
-                    Outcome(accepted = true, worthRetrying = false, reason = "accepted")
+                    Outcome(Delivery.DELIVERED, worthRetrying = false, reason = "accepted")
                 status in 200..299 -> {
-                    if (!warned.getAndSet(true)) {
-                        TraceLog.warn(
-                            "$path answered $status but not as the Trace API does, so nothing is being delivered: " +
-                                "check the configured api url",
-                        )
-                    }
-                    Outcome(false, worthRetrying = false, reason = "answered $status without the Trace API's answer")
+                    warnOnce(
+                        "$path answered $status but not as the Trace API does, so nothing is being delivered: " +
+                            "check the configured api url",
+                    )
+                    val reason = "answered $status without the Trace API's answer"
+                    Outcome(Delivery.WRONG_CONFIGURATION, worthRetrying = false, reason = reason)
+                }
+                status == 401 || status == 403 -> {
+                    warnOnce("$path was refused with $status, so nothing is being delivered: check the api key")
+                    Outcome(Delivery.WRONG_CONFIGURATION, worthRetrying = false, reason = "refused with $status")
                 }
                 // A 4xx is the server saying the payload is wrong, and it will say the same thing again. Retrying
                 // is noise that reads as a flaky network and spends somebody else's data allowance three times.
-                status in 400..499 -> Outcome(accepted = false, worthRetrying = false, reason = "refused with $status")
-                else -> Outcome(accepted = false, worthRetrying = true, reason = "server answered $status")
+                status in 400..499 -> Outcome(Delivery.FAILED, worthRetrying = false, reason = "refused with $status")
+                else -> Outcome(Delivery.FAILED, worthRetrying = true, reason = "server answered $status")
             }
         } catch (networkFailure: IOException) {
             // No connection, no answer, or an answer too late. Worth another try: the next one may find a network.
-            Outcome(accepted = false, worthRetrying = true, reason = "the request did not complete")
+            Outcome(Delivery.FAILED, worthRetrying = true, reason = "the request did not complete")
         } catch (notHttp: Exception) {
             // A configured url that parses but is not HTTP, so openConnection hands back something else. It will
             // not become HTTP on a second attempt.
-            Outcome(accepted = false, worthRetrying = false, reason = "the configured api url is not an http url")
+            Outcome(Delivery.WRONG_CONFIGURATION, false, reason = "the configured api url is not an http url")
         } finally {
             runCatching { connection?.disconnect() }
         }
+    }
+
+    /** Writes [line] whether or not the host app turned logging on, once per transport. */
+    private fun warnOnce(line: String) {
+        if (!warned.getAndSet(true)) TraceLog.warn(line)
     }
 
     /** Whether [answer] is what the Trace API answers [path] with when it has taken the request. */

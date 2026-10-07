@@ -123,10 +123,17 @@ internal class ConsentGate(
         installed > 0 && System.currentTimeMillis() - installed in 0L until DAY_MILLIS
     }.getOrDefault(false)
 
-    // Stamped with the key and GRANTED here, because neither was known when the event was recorded.
+    // Stamped with the key and GRANTED here, because neither was known when the event was recorded. A first open sent
+    // with a wrong configuration (a wrong address, or an api key the API refused) certainly did not reach Trace, so it
+    // is not marked sent and the next launch sends it again, which reports the install once the app ships fixed.
     private fun send(event: Event, key: String) {
-        sender.send(event.copy(anonUserKey = key, consentStatus = ConsentState.GRANTED))
-        if (event.type == EventType.FIRST_OPEN) recordFirstOpenSent(appContext)
+        val delivery = sender.send(event.copy(anonUserKey = key, consentStatus = ConsentState.GRANTED))
+        if (event.type != EventType.FIRST_OPEN) return
+        if (delivery == Delivery.WRONG_CONFIGURATION) {
+            TraceLog.log("the first open did not reach the Trace API, so the next launch sends it again")
+        } else {
+            recordFirstOpenSent(appContext)
+        }
     }
 
     private fun hold(event: Event) {
@@ -158,7 +165,7 @@ internal class ConsentGate(
 
         // Written after the first open has gone to the transport, not before: a flag written first would suppress an
         // install that was never sent. It is written whether or not the server took it, because there is no retry
-        // across launches (see the class comment on Trace).
+        // across launches (see the class comment on Trace), except after a wrong configuration, which [send] skips.
         private fun recordFirstOpenSent(context: Context) {
             val kept = runCatching { firstOpenFlag(context).writeText(Event.nowIso8601()) }.isSuccess
             if (!kept) TraceLog.log("could not record that the install was reported, so a later launch may report it again")

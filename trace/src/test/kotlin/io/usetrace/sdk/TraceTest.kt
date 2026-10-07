@@ -60,11 +60,11 @@ class TraceTest {
         val consentKeys = mutableListOf<String>()
         val threads = mutableSetOf<String>()
 
-        override fun send(event: Event): Boolean = synchronized(this) {
+        override fun send(event: Event): Delivery = synchronized(this) {
             calls.add("event ${event.type}${event.eventName?.let { " $it" } ?: ""}")
             events.add(event)
             threads.add(Thread.currentThread().name)
-            true
+            Delivery.DELIVERED
         }
 
         override fun sendConsent(key: String, analytics: Boolean, marketing: Boolean, firstAnswer: Boolean): Boolean =

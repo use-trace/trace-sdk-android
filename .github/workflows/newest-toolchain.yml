@@ -11,9 +11,6 @@ on:
   schedule:
     - cron: '23 3 * * 1'
   workflow_dispatch:
-  # Temporary, to prove the workflow on its pull request. Removed before merge.
-  pull_request:
-    paths: [.github/workflows/newest-toolchain.yml]
 
 permissions:
   contents: read
@@ -90,7 +87,7 @@ jobs:
       - name: Record the outcome
         env:
           GH_TOKEN: ${{ github.token }}
-          TITLE: Test incident from the newest toolchain workflow, ignore
+          TITLE: Newest toolchain run is failing
           OUTCOME: ${{ needs.newest.result }}
           BODY: The weekly newest toolchain run failed. It builds the SDK and runs its unit tests on the newest stable Android Gradle plugin, Kotlin, Gradle, compileSdk and LTS JDK, so a customer on the newest Android Studio may hit the same break.
           RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}

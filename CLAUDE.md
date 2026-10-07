@@ -40,6 +40,10 @@ the SDK gets it wrong, which is why they are here rather than in a comment somew
   event, with a 200. Any ordinary client is fine: okhttp, Dalvik and CFNetwork all pass.
 - **Send `source_type: "app"` and a `platform`.** The server infers an app from a `FIRST_OPEN` as a backstop, but do
   not rely on the backstop.
+- **A 2xx is not proof of delivery.** The dashboard answers a POST with a web page and a 200, which lost every
+  event sent to the old default address on 7 October 2026. A send is delivered only when the body is the API's own
+  answer: `"accepted": true` from `/v1/event` (202), a boolean `cookie_set` from `/v1/consent` (201). A 2xx without
+  it is a wrong address: not delivered, not retried, and logged once per launch even with logging off.
 - **An install with no install id is refused, with a 400.** That is deliberate: the server will not invent an
   identity from a device signature, because that is fingerprinting. Always send the key.
 - **Expose the install id to the host app.** A person's access and erasure rights depend on them being able to find

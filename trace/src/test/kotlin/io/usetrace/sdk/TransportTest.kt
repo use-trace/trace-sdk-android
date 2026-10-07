@@ -35,8 +35,8 @@ class TransportTest {
         TraceLog.redirect(null)
     }
 
-    private fun stub(eventStatus: Int = 202, consentStatus: Int = 201, delayMillis: Long = 0): StubApi =
-        StubApi(eventStatus, consentStatus, delayMillis).also { api = it }
+    private fun stub(eventStatus: Int = 202, consentStatus: Int = 201, delayMillis: Long = 0, body: String? = null) =
+        StubApi(eventStatus, consentStatus, delayMillis, body).also { api = it }
 
     private fun transport(url: String, timeoutMillis: Int = 10_000) =
         Transport(apiKey = "trace_pk_test", apiUrl = url, timeoutMillis = timeoutMillis)
@@ -262,6 +262,78 @@ class TransportTest {
         val api = stub(eventStatus = 200)
 
         assertTrue(transport(api.url).send(firstOpen()))
+    }
+
+    /**
+     * 7 October 2026: the default address reached the dashboard, which answers a POST with a web page and a 200, and
+     * every event was counted as delivered and lost. A 2xx that is not the API's answer is a wrong address: not
+     * delivered, not retried, and logged once, with logging off, because that is the developer who needs to hear it.
+     */
+    @Test
+    fun `a 200 web page is not delivered, is not retried and is logged once with logging off`() {
+        val lines = CopyOnWriteArrayList<String>()
+        TraceLog.redirect { lines.add(it) }
+        val api = stub(eventStatus = 200, consentStatus = 200, body = "<!DOCTYPE html><html><body>Trace</body></html>")
+        val transport = transport(api.url)
+
+        assertFalse(transport.send(firstOpen()))
+        assertFalse(transport.send(firstOpen()))
+        assertFalse(transport.sendConsent(key, analytics = true, marketing = false))
+
+        assertEquals("a wrong address stays wrong, so it is not retried", 3, api.requests.size)
+        assertEquals(1, lines.size)
+        assertTrue(lines.single(), "check the configured api url" in lines.single())
+    }
+
+    @Test
+    fun `a 202 with accepted true is delivered`() {
+        listOf(
+            "{\"accepted\":true}",
+            "{\"accepted\":true,\"buffered\":true,\"request_id\":\"req_placeholder\"}",
+            "{\"accepted\":true,\"ignored\":true,\"reason\":\"ip_excluded\"}",
+        ).forEach { body ->
+            val api = stub(body = body)
+            assertTrue(body, transport(api.url).send(firstOpen()))
+            assertEquals(body, 1, api.requests.size)
+            api.stop()
+        }
+    }
+
+    @Test
+    fun `a 201 with the consent answer is delivered`() {
+        listOf(
+            "{\"anon_user_key\":null,\"cookie_set\":false,\"journey_ref\":null}",
+            "{\"anon_user_key\":null,\"cookie_set\":false,\"ignored\":true,\"reason\":\"ip_excluded\"}",
+        ).forEach { body ->
+            val api = stub(body = body)
+            assertTrue(body, transport(api.url).sendConsent(key, analytics = false, marketing = false))
+            assertEquals(body, 1, api.requests.size)
+            api.stop()
+        }
+    }
+
+    // Each route is held to its own answer, so the event's answer does not pass for the consent call's.
+    @Test
+    fun `a 2xx with other json is not delivered on the event route`() {
+        listOf(
+            "", "{}", "[]", "null", "{\"ok\":true}", "{\"accepted\":false}", "{\"accepted\":\"true\"}",
+            "{\"cookie_set\":true}",
+        ).forEach { body ->
+            val api = stub(body = body)
+            assertFalse(body, transport(api.url).send(firstOpen()))
+            assertEquals(body, 1, api.requests.size)
+            api.stop()
+        }
+    }
+
+    @Test
+    fun `a 2xx with other json is not delivered on the consent route`() {
+        listOf("", "{}", "[]", "{\"ok\":true}", "{\"accepted\":true}", "{\"cookie_set\":\"true\"}").forEach { body ->
+            val api = stub(body = body)
+            assertFalse(body, transport(api.url).sendConsent(key, analytics = true, marketing = false))
+            assertEquals(body, 1, api.requests.size)
+            api.stop()
+        }
     }
 
     @Test

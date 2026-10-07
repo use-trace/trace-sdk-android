@@ -1,9 +1,11 @@
 package io.usetrace.sdk
 
 import android.os.Build
+import org.json.JSONObject
 import java.io.IOException
 import java.net.HttpURLConnection
 import java.net.URL
+import java.util.concurrent.atomic.AtomicBoolean
 
 /**
  * What the consent gate sends through, and the only part of the transport anything else in the SDK may depend on.
@@ -46,6 +48,14 @@ internal interface EventSender {
  * server took it. Holding an event until consent is known is the consent gate's job, and deciding what to do with a
  * false is the caller's.
  *
+ * **Delivered means a 2xx with the Trace API's own answer, not any 2xx.** `/v1/event` answers 202 with
+ * `"accepted": true`, and `/v1/consent` answers 201 with a boolean `cookie_set`. Until 7 October 2026 any 2xx
+ * counted, and the default address reached the dashboard, which answers a POST with a web page and a 200: every
+ * event was lost and nothing said so. A 2xx without that answer (a page, an empty body, some other JSON) is an
+ * address that is not the Trace API. It is not delivered and it is not retried, because a wrong address stays wrong.
+ * It is logged once per transport, whether or not the host app turned logging on, because a developer who never
+ * turned it on is the one who needs to hear it, and without the body, which could hold anything.
+ *
  * It is synchronous. Every call must be made on a background thread, which the public API owns.
  */
 internal class Transport(
@@ -57,11 +67,15 @@ internal class Transport(
 
     private val baseUrl: String = apiUrl.trimEnd('/')
 
+    /** Whether the configuration error has been logged. */
+    private val warned = AtomicBoolean(false)
+
     /**
      * Sends one event to `POST /v1/event` and returns whether the server took it.
      *
-     * True means a 2xx. False means the server refused it or could not be reached, and the caller still holds the
-     * only copy: nothing here retries a 4xx, because a payload the server rejected it will reject again.
+     * True means a 2xx with `"accepted": true`. False means the server refused it, could not be reached, or was not
+     * the Trace API, and the caller still holds the only copy: nothing here retries a 4xx, because a payload the
+     * server rejected it will reject again.
      */
     override fun send(event: Event): Boolean {
         val accepted = post("/v1/event", event.toJson())
@@ -107,7 +121,7 @@ internal class Transport(
 
         var attempt = 1
         while (true) {
-            val outcome = attempt(url, body)
+            val outcome = attempt(url, path, body)
             if (outcome.accepted) return true
             if (!outcome.worthRetrying || attempt == ATTEMPTS) {
                 TraceLog.log("$path failed on attempt $attempt of $ATTEMPTS, ${outcome.reason}, giving up")
@@ -123,7 +137,7 @@ internal class Transport(
 
     private class Outcome(val accepted: Boolean, val worthRetrying: Boolean, val reason: String)
 
-    private fun attempt(url: URL, body: String): Outcome {
+    private fun attempt(url: URL, path: String, body: String): Outcome {
         var connection: HttpURLConnection? = null
         return try {
             connection = (url.openConnection() as HttpURLConnection).apply {
@@ -140,11 +154,25 @@ internal class Transport(
             connection.outputStream.use { it.write(body.toByteArray(Charsets.UTF_8)) }
 
             val status = connection.responseCode
-            // Drained so the socket can be reused rather than left to a finaliser.
-            runCatching { (if (status in 200..299) connection.inputStream else connection.errorStream)?.close() }
+            // Read to the end so the socket can be reused rather than left to a finaliser.
+            val answer = runCatching {
+                (if (status in 200..299) connection.inputStream else connection.errorStream)?.use {
+                    it.readBytes().decodeToString()
+                }
+            }.getOrNull()
 
             when {
-                status in 200..299 -> Outcome(accepted = true, worthRetrying = false, reason = "accepted")
+                status in 200..299 && isTraceAnswer(answer, path) ->
+                    Outcome(accepted = true, worthRetrying = false, reason = "accepted")
+                status in 200..299 -> {
+                    if (!warned.getAndSet(true)) {
+                        TraceLog.warn(
+                            "$path answered $status but not as the Trace API does, so nothing is being delivered: " +
+                                "check the configured api url",
+                        )
+                    }
+                    Outcome(false, worthRetrying = false, reason = "answered $status without the Trace API's answer")
+                }
                 // A 4xx is the server saying the payload is wrong, and it will say the same thing again. Retrying
                 // is noise that reads as a flaky network and spends somebody else's data allowance three times.
                 status in 400..499 -> Outcome(accepted = false, worthRetrying = false, reason = "refused with $status")
@@ -160,6 +188,12 @@ internal class Transport(
         } finally {
             runCatching { connection?.disconnect() }
         }
+    }
+
+    /** Whether [answer] is what the Trace API answers [path] with when it has taken the request. */
+    private fun isTraceAnswer(answer: String?, path: String): Boolean {
+        val json = runCatching { JSONObject(answer.orEmpty()) }.getOrNull() ?: return false
+        return if (path == "/v1/consent") json.opt("cookie_set") is Boolean else json.opt("accepted") == true
     }
 
     // False when the wait was interrupted, which means whatever is sending is being shut down, so stop.

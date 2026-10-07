@@ -19,8 +19,10 @@ internal class Recorded(
 }
 
 /**
- * The Trace API, reduced to the status codes it answers with: an event with 202 and a consent call with 201,
- * because those are the real ones. It records what arrived, in the order it arrived.
+ * The Trace API, reduced to what it answers with: an event with 202 and `"accepted": true`, a consent call with 201
+ * and a boolean `cookie_set`, because those are the real ones (`apps/api/src/tim/tim.controller.ts` and
+ * `apps/api/src/consent/consent.controller.ts` in the monorepo). [answer] replaces the answer, for an address that is
+ * not the Trace API. It records what arrived, in the order it arrived.
  *
  * A plain [ServerSocket] rather than `com.sun.net.httpserver`, which the plan assumed: an Android unit test
  * compiles against `android.jar`, so the JDK's own HTTP server is not on the classpath at all. Serving one
@@ -33,6 +35,7 @@ internal class StubApi(
     private val eventStatus: Int = 202,
     private val consentStatus: Int = 201,
     private val delayMillis: Long = 0,
+    private val answer: String? = null,
 ) {
     val requests = CopyOnWriteArrayList<Recorded>()
 
@@ -92,14 +95,21 @@ internal class StubApi(
 
         val status = (if (first) null else statusAfterFirst)
             ?: if (path.endsWith("/consent")) consentStatus else eventStatus
+        val reply = (
+            answer ?: when {
+                status !in 200..299 -> "{}"
+                path.endsWith("/consent") -> "{\"anon_user_key\":null,\"cookie_set\":true,\"journey_ref\":null}"
+                else -> "{\"accepted\":true}"
+            }
+            ).toByteArray()
         connection.getOutputStream().apply {
             write(
                 (
                     "HTTP/1.1 $status ${reason(status)}\r\n" +
                         "Content-Type: application/json\r\n" +
-                        "Content-Length: 2\r\n" +
-                        "Connection: close\r\n\r\n{}"
-                    ).toByteArray()
+                        "Content-Length: ${reply.size}\r\n" +
+                        "Connection: close\r\n\r\n"
+                    ).toByteArray() + reply
             )
             flush()
         }

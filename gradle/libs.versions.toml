@@ -7,7 +7,7 @@ kotlin = "2.4.20"
 installreferrer = "2.2"
 junit = "4.13.2"
 # 4.14 is the first with an android-all jar for API 35, so the tests can run at compileSdk as well as minSdk.
-robolectric = "4.14.1"
+robolectric = "4.15.1"
 # Writes the public API to trace/api/trace.api and fails the build when the two disagree.
 bcv = "0.16.3"
 # Publishes to Maven Central through the Central Portal, signed, with sources and javadoc jars. 0.35 and later need

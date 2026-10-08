@@ -54,6 +54,32 @@ class TransportTest {
      * is that list, read off the wire with every field filled in. A field added to an event or to the consent call
      * fails here until the README says what it is and this list names it.
      */
+    // The site's region decides whether the Play referrer may be read before consent, as GET /v1/snippet-config tells
+    // the website tag. Anything but a 200 with a boolean consent_gated is no answer, which the SDK reads as gated.
+    @Test
+    fun `the site's consent rule is read from its config, once, with the key in the query`() {
+        val cases = listOf(
+            200 to "{\"banner\":null,\"consent_gated\":true}" to true,
+            200 to "{\"banner\":null,\"consent_gated\":false}" to false,
+            200 to "{\"banner\":null}" to null,
+            200 to "{\"consent_gated\":\"false\"}" to null,
+            200 to "<!DOCTYPE html><html></html>" to null,
+            401 to "{\"consent_gated\":false}" to null,
+            500 to "{}" to null,
+        )
+        for ((reply, gated) in cases) {
+            val (status, body) = reply
+            val server = stub(eventStatus = status, body = body)
+            assertEquals("$status $body", gated, transport(server.url).consentGated())
+            val request = server.requests.single()
+            assertEquals("/v1/snippet-config?key=trace_pk_test", request.path)
+            assertTrue(request.header("User-Agent")!!.startsWith("TraceSdkAndroid/"))
+            assertEquals("", request.body)
+            server.stop()
+        }
+        assertEquals("unreachable is no answer", null, transport("http://127.0.0.1:9", timeoutMillis = 200).consentGated())
+    }
+
     @Test
     fun `every field that leaves the device is one the store declarations name`() {
         val declared = setOf(

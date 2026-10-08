@@ -42,7 +42,7 @@ new Android projects have already, add:
 
 ```kotlin
 dependencies {
-    implementation("io.usetrace:trace-sdk-android:0.1.0")
+    implementation("io.usetrace:trace-sdk-android:0.2.0")
 }
 ```
 
@@ -70,12 +70,12 @@ class MyApplication : Application() {
 }
 ```
 
-`initialise` returns at once. Reading the referrer and recording the first open happen afterwards on one background
-thread the SDK owns, so no method here does network work on the thread that called it
+`initialise` returns at once. Asking Trace about the site, reading the referrer and recording the first open happen
+afterwards on one background thread the SDK owns, so no method here does network work on the thread that called it
 and none of them throws into your app.
 
-Call it in `onCreate` rather than later. The Play Store only offers the install referrer for a limited window after
-an install, so a later call has a worse chance of reading it. Calling `initialise` a second time does nothing and
+Call it in `onCreate` rather than later. The Play Store offers the install referrer for 90 days after an install,
+so a much later call, or a yes given after that, has no referrer to read (see "Before consent, by region"). Calling `initialise` a second time does nothing and
 says so in logcat: the install happened once.
 
 `TraceConfig` takes three things and has nothing else to configure:
@@ -91,9 +91,10 @@ stripped where the line is written. It is safe to turn on in a release build, th
 
 ## Consent
 
-**Nothing is sent and nothing is stored until you call `setConsent`.** Until then every event, including the first
-open, is held in memory and sent to nobody, and no install id exists. An app that never calls `setConsent` sends
-nothing and writes nothing to the device, which is the correct behaviour and not a fault to report.
+**Nothing is sent and no identifier is stored until you call `setConsent`.** Until then every event, including the
+first open, is held in memory and sent to nobody, and no install id exists. An app that never calls `setConsent`
+sends nothing about anybody, which is the correct behaviour and not a fault to report. On a UK or EU site it also
+reads no install referrer and writes nothing to the device.
 
 ```kotlin
 // Your consent interface, whatever it is, on the answer rather than on the launch.
@@ -118,13 +119,30 @@ consent record belongs to your app, which has to display it, change it and withd
 eventually disagree. An app that calls it once after its banner and never again spends every later launch holding
 events it should be sending.
 
+### Before consent, by region
+
+Reading the Play Store install referrer is reading information held on the device, which needs consent where
+consent is required (PECR regulation 6, ePrivacy article 5(3); decided by Dom on 8 October 2026 after legal advice).
+So the SDK follows your site's region in Trace, as the website tracking tag and the iOS SDK do. On an install's first
+launch it asks Trace, with your api key, whether the site is consent gated (`GET /v1/snippet-config`).
+
+| Your site's region | Before the person answers | After a yes | After a no |
+| --- | --- | --- | --- |
+| UK and EU, or no region set | The referrer is not read. The first open waits in memory without it. | The referrer is read, then the first open is sent with it. | The referrer is never read. |
+| US or Other | The referrer is read at launch and held in memory with the first open. | The first open is sent with it. | The referrer is not read, or what was read is discarded with the first open. |
+
+If the SDK cannot ask (no network, an older API) and has no earlier "not gated" answer, it treats the site as consent
+gated. The answer your app passes straight after `initialise` is handled before the SDK reads the referrer, so on a
+US or Other site a stored refusal stops the read. Once the first open has been reported the SDK does not ask again.
+
 ## What is stored on the device, and when
 
-Nothing before the person grants consent. Decided on 6 October 2026, before the first release.
+No identifier before the person grants consent. Decided on 6 October 2026, before the first release.
 
 | When | What the SDK writes, in `Context.getNoBackupFilesDir()` |
 | --- | --- |
-| Before an answer | Nothing. The first open and any conversions are held in memory only. |
+| Before an answer, UK and EU site | Nothing. The first open and any conversions are held in memory only. |
+| Before an answer, US or Other site | `site_not_consent_gated`, an empty file, Trace's last answer about the site. Nothing else. |
 | On a grant | `install_id`, the install id, if there is not one yet. `first_open_sent`, once the first open has been sent. |
 | On a refusal | Nothing. |
 
@@ -198,8 +216,9 @@ not the whole of your app's form. They follow Google's definitions as read on 6 
 
 ### What leaves the device
 
-Before a grant, only a refusal in the install's first day, with no identifier: that the person said no, their
-marketing answer, the time, and that this is Android (`ConsentGate.kt`, `Transport.kt`). After
+Before a grant, about the person only a refusal in the install's first day, with no identifier: that the person said
+no, their marketing answer, the time, and that this is Android (`ConsentGate.kt`, `Transport.kt`). The first launch
+also asks Trace whether the site is consent gated, which carries nothing about the person. After
 `setConsent(analytics = true)`:
 
 | Sent | Where it comes from |
@@ -212,8 +231,9 @@ marketing answer, the time, and that this is Android (`ConsentGate.kt`, `Transpo
 | A conversion's name, value, currency and metadata, as your app passes them | `Trace.kt` |
 | The SDK's version and the Android version, in the user agent | `Transport.kt` |
 
-The install referrer is read from the Play Store on the device at the first launch and held in memory with the
-first open; it leaves the device only with that first open, after a grant. It can carry an ad click id, which Trace
+The install referrer is read from the Play Store on the device, on a UK or EU site only after a yes and elsewhere at
+the first launch unless the person refused, and held in memory with the first open; it leaves the device only with
+that first open, after a grant. It can carry an ad click id, which Trace
 removes before it stores the install.
 
 Like any request, it reaches Trace from the device's IP address. Trace uses that to apply rate limits and the
@@ -272,6 +292,9 @@ These are real. They are here rather than discovered.
 - **The backup exclusion is proved by a file assertion, not on a device.** The suite asserts the id and the first
   open flag are written under `getNoBackupFilesDir()`. Nothing here proves the platform honours that exclusion; that
   needs a device test driving `bmgr`, which this slice does not have.
+- **On a UK or EU site, a yes given more than 90 days after the install comes too late for the referrer.** The Play
+  Store keeps it for 90 days, and on such a site it is read only after a yes, so the install is reported then, with
+  no referrer, as direct.
 - **A referrer the Play Store will not give is a direct install, not an error.** `FEATURE_NOT_SUPPORTED`, a Play
   Services that is absent or out of date, a sideloaded build, or a client that never answers at all: in every case
   the install is still reported, with no referrer, and lands in direct.

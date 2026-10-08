@@ -63,9 +63,17 @@ the SDK gets it wrong, which is why they are here rather than in a comment somew
 - No advertising identifiers. No IDFA, no GAID, no device fingerprint, ever, however convenient.
 - A visitor identity must never appear in a log line or an error report.
 - Hold events until consent is known. Do not send and apologise later.
-- **Nothing is written to the device before consent** (decided 6 October 2026, before the first release). Before an
+- **The Play install referrer follows the site's region** (the legal adviser's answer, decided by Dom on 8 October
+  2026: reading it is access to information on the device, PECR regulation 6, ePrivacy article 5(3)). On the first
+  launch that has not reported the install, the SDK asks `GET /v1/snippet-config?key=` for `consent_gated`, keeps
+  only a "not gated" answer (`site_not_consent_gated`, an empty file) and treats no answer as gated. Gated (UK and EU,
+  or no region): the referrer is read only after a yes, just before the held first open is sent. Not gated (US,
+  Other): it is read at launch, behind the answer the app passes straight after `initialise`, unless that answer is
+  a no. A refusal never reads it. Do not read it before a yes on a gated site.
+- **Nothing identifying is written to the device before consent** (decided 6 October 2026, before the first release). Before an
   answer the first open and every conversion are held in memory only and no install id exists. A grant writes
-  `install_id` and, once the first open has been sent, `first_open_sent`. A refusal writes nothing and sends no
+  `install_id` and, once the first open has been sent, `first_open_sent`. The only other file is the empty
+  `site_not_consent_gated` above, on a site that is not gated. A refusal writes nothing and sends no
   identifier: with no install id it is reported anonymously, with `first_answer` true, at most once a process in the
   install's first day, so the server can count it (README, "Counting each answer once"). The consent
   answer is not stored at all: the host app keeps it and passes it on every launch. A process killed before an

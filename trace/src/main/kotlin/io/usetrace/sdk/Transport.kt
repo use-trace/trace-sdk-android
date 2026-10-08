@@ -5,6 +5,7 @@ import org.json.JSONObject
 import java.io.IOException
 import java.net.HttpURLConnection
 import java.net.URL
+import java.net.URLEncoder
 import java.util.concurrent.atomic.AtomicBoolean
 
 /**
@@ -50,6 +51,12 @@ internal interface EventSender {
      * `first_answer` true. Returns whether the server took it. Never throws.
      */
     fun sendFirstRefusal(marketing: Boolean): Boolean
+
+    /**
+     * Whether the site is consent gated (UK and EU, or no region set), from the site's config, or null when there is
+     * no answer. Decides whether the Play referrer may be read before consent. Never throws.
+     */
+    fun consentGated(): Boolean?
 }
 
 /**
@@ -116,6 +123,35 @@ internal class Transport(
 
     override fun sendFirstRefusal(marketing: Boolean): Boolean =
         postConsent("consent_analytics" to false, "consent_marketing" to marketing, "first_answer" to true)
+
+    /**
+     * `GET /v1/snippet-config?key=`, which tells the website tag the same thing. Asked once and never retried: no
+     * answer reads as gated, which only makes the referrer wait for consent. The key is the site's public tracking
+     * key, as in the tag's own request, and names a site rather than anybody.
+     */
+    override fun consentGated(): Boolean? {
+        var connection: HttpURLConnection? = null
+        val gated = try {
+            val url = URL("$baseUrl/v1/snippet-config?key=${URLEncoder.encode(apiKey, "UTF-8")}")
+            connection = (url.openConnection() as HttpURLConnection).apply {
+                connectTimeout = timeoutMillis
+                readTimeout = timeoutMillis
+                setRequestProperty("User-Agent", userAgent)
+            }
+            if (connection.responseCode != 200) {
+                null
+            } else {
+                val answer = JSONObject(connection.inputStream.use { it.readBytes().decodeToString() })
+                answer.opt("consent_gated") as? Boolean
+            }
+        } catch (failure: Exception) {
+            null
+        } finally {
+            runCatching { connection?.disconnect() }
+        }
+        if (gated == null) TraceLog.log("the site's consent rule could not be read, so it is treated as consent gated")
+        return gated
+    }
 
     // The share of people who said yes is worked out per platform, counting each install's answer once by
     // first_answer (decision 3 of APP_MODELLED_INSTALLS.md in use-trace/trace).

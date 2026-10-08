@@ -1,6 +1,7 @@
 package io.usetrace.sdk
 
 import android.content.Context
+import java.io.File
 import java.util.concurrent.CountDownLatch
 import java.util.concurrent.ExecutorService
 import java.util.concurrent.Executors
@@ -42,8 +43,9 @@ import java.util.concurrent.atomic.AtomicReference
  * before it, and the order of a journey is the point. A second thread would interleave the two or deadlock on the
  * gate, so if this ever becomes a pool, the gate has to change first.
  *
- * **Nothing is written to the device before consent.** Before the person has answered, the first open and every
- * conversion are held in memory only, and no install id exists. A grant writes the install id and, once the first
+ * **Nothing identifying is written to the device before consent.** Before the person has answered, the first open
+ * and every conversion are held in memory only, and no install id exists. On a US or Other site one empty file says
+ * the site is not consent gated; on a gated site nothing is written and the Play referrer is not read before a yes. A grant writes the install id and, once the first
  * open has been sent, the first open flag. A refusal writes nothing. An app killed before an answer loses what was
  * held, and its next launch records a first open again, because no flag was written.
  *
@@ -92,14 +94,28 @@ public object Trace {
     internal var referrerDeadlineMillis: Long = REFERRER_DEADLINE_MILLIS
 
     /**
+     * An empty file: the site's last answer was that it is not consent gated (a US or Other site). Written only then,
+     * so a gated site writes nothing, and no file, the same as no answer, reads as gated.
+     */
+    internal const val NOT_GATED_FLAG: String = "site_not_consent_gated"
+
+    // The Play referrer, which is information held on the device, so reading it is access that needs consent where
+    // consent is required (the legal adviser's answer, decided by Dom on 8 October 2026). The first open is held
+    // without it until it may be read: after a yes on a consent gated site, at launch on a US or Other site unless
+    // the person refused. Play keeps it for 90 days, so a later yes still gets it. Touched on the SDK's own thread only.
+    private var readReferrer: (() -> Unit)? = null
+
+    /**
      * Starts the SDK and reports the install, once, with whatever the Play Store says produced it.
      *
-     * Call it in `Application.onCreate`, with the application context. Calling it later works, but the referrer is
-     * only available for a limited window after an install, so later means a worse chance of reading it. Calling it
-     * a second time does nothing and says so: the install already happened.
+     * Call it in `Application.onCreate`, with the application context. Calling it later works, but the Play Store
+     * keeps the referrer for 90 days after an install. Calling it a second time does nothing and says so: the install
+     * already happened.
      *
-     * It returns immediately. Reading the referrer and recording the first open happen on the SDK's own thread
-     * afterwards.
+     * It returns immediately. Asking the site whether it is consent gated, reading the referrer and recording the
+     * first open happen on the SDK's own thread afterwards. **The referrer follows the site's region**: on a consent
+     * gated site (UK and EU, or no region, or no answer) it is read only after a yes; on a US or Other site at launch,
+     * after any answer the app passes straight after this call, unless that answer is a no.
      *
      * **The first open is held in memory until [setConsent] is called**, and nothing is written to the device before
      * then. So nothing reaches Trace until the host app has said what the person answered, and an app that never
@@ -140,7 +156,12 @@ public object Trace {
         val gate = gate ?: return TraceLog.warn(
             "Trace.setConsent was called before Trace.initialise, so the answer was not recorded",
         )
-        submit { gate.setConsent(analytics, marketing) }
+        submit {
+            // A yes reads the referrer before the held first open goes; a no never reads it.
+            if (analytics) readReferrer?.invoke()
+            readReferrer = null
+            gate.setConsent(analytics, marketing)
+        }
     }
 
     /**
@@ -250,7 +271,8 @@ public object Trace {
             // ContentProvider that runs before the application object exists, so fall back rather than crash.
             val application = context.applicationContext ?: context
             TraceLog.debugLogging = config.debugLogging
-            val newGate = ConsentGate(application, sender ?: Transport(config.apiKey, config.apiUrl))
+            val transport = sender ?: Transport(config.apiKey, config.apiUrl)
+            val newGate = ConsentGate(application, transport)
             appContext = application
             gate = newGate
 
@@ -258,13 +280,14 @@ public object Trace {
             // one. It has to be queued before this returns, so that a setConsent on the next line cannot overtake
             // the first open it is meant to release.
             val fetch = fetchReferrer ?: InstallReferrer::fetch
-            submit { sendFirstOpenIfNeeded(application, newGate, fetch) }
+            submit { sendFirstOpenIfNeeded(application, newGate, transport, fetch) }
         }
     }
 
     private fun sendFirstOpenIfNeeded(
         context: Context,
         gate: ConsentGate,
+        sender: EventSender,
         fetchReferrer: (Context, (String?) -> Unit) -> Unit,
     ) {
         if (runCatching { ConsentGate.firstOpenFlag(context).exists() }.getOrDefault(false)) {
@@ -272,6 +295,8 @@ public object Trace {
             return
         }
 
+        val gated = siteIsConsentGated(context, sender)
+        // Held without the referrer: it is filled in when it may be read, before the first open is sent.
         gate.record(
             Event(
                 type = EventType.FIRST_OPEN,
@@ -279,11 +304,34 @@ public object Trace {
                 anonUserKey = "",
                 consentStatus = gate.state,
                 appVersion = appVersion(context),
-                installReferrer = awaitReferrer(context, fetchReferrer),
             ),
         )
+        readReferrer = { gate.fillReferrer(awaitReferrer(context, fetchReferrer)) }
+        // On a site that is not gated it is read at launch, behind the answer the app passes straight after
+        // initialise, so a refusal passed then comes first and nothing is read.
+        if (!gated) {
+            submit {
+                if (gate.state == ConsentState.UNKNOWN) readReferrer?.invoke()
+                if (gate.state != ConsentState.GRANTED) readReferrer = null
+            }
+        }
         // No flag here. The gate writes it when the first open is sent, so a launch that ends before an answer
         // writes nothing and the next launch reports the install instead.
+    }
+
+    // The site's answer is kept only when it is "not gated", so a gated site writes nothing before consent. No answer
+    // falls back to the last one kept, and with none kept, gated.
+    private fun siteIsConsentGated(context: Context, sender: EventSender): Boolean {
+        val kept = File(context.noBackupFilesDir, NOT_GATED_FLAG)
+        val answer = sender.consentGated()
+        runCatching {
+            when (answer) {
+                true -> kept.delete()
+                false -> if (!kept.exists()) kept.writeText("")
+                null -> Unit
+            }
+        }
+        return answer ?: !runCatching { kept.exists() }.getOrDefault(false)
     }
 
     /**
@@ -379,6 +427,7 @@ public object Trace {
         synchronized(this) {
             appContext = null
             gate = null
+            readReferrer = null
             referrerDeadlineMillis = REFERRER_DEADLINE_MILLIS
         }
     }

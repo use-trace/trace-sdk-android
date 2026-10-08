@@ -58,7 +58,7 @@ jobs:
           java-version: |
             17
             ${{ steps.v.outputs.jdk }}
-      - uses: gradle/actions/setup-gradle@v4
+      - uses: gradle/actions/setup-gradle@v5
       - name: Build and test
         run: ./gradlew :trace:assembleRelease :trace:testDebugUnitTest --no-daemon -Porg.gradle.java.installations.fromEnv=JAVA_HOME_17_X64
       - name: Keep the reports when a test fails

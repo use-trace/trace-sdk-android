@@ -7,6 +7,12 @@ The Android SDK for Trace (usetrace.io). The server side it talks to lives in th
 this SDK has to obey, and it is kept up to date as the server side changes. What follows is the subset that binds
 this repository, not a replacement for it.
 
+## Pull requests are reviewed by the shared review loop
+
+Every pull request is reviewed by use-trace/trace's review loop after CI passes: a reviewer reads the change against this
+file and the rules, and a fixer can push fixes. The ruleset requires `review-gate`, so nothing merges until the loop has
+approved it. Add `hold` to keep a pull request back.
+
 ## Working rules
 
 - British English in code comments, documentation and commit messages. No em dashes or en dashes anywhere. Use

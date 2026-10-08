@@ -10,8 +10,14 @@ jobs:
   house:
     name: house
     runs-on: ubuntu-24.04
+    permissions:
+      contents: read
+      pull-requests: read
+      issues: read
     steps:
       - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
       - name: No em dashes or en dashes
         run: |
           # Byte patterns, so the check reads the same whatever the runner's locale. -I skips binary files.
@@ -28,6 +34,71 @@ jobs:
             exit 1
           fi
           echo "Pinned."
+      # The legal check with this repository's profile (scripts/check-legal-compliance.mjs --profile in
+      # use-trace/trace, docs/plans/REPO_AUTOMATION.md there), fetched from use-trace/trace main as the review loop's
+      # scripts are: identifiers in log calls, real looking emails and IPs in tests, regulated claims against the
+      # monorepo's docs/legal/claims.json, new copyleft licences, and the legal paths, which wait for legal-approved
+      # from a named approver (vars.LEGAL_APPROVERS, comma separated).
+      - name: Fetch the legal check
+        id: fetch
+        if: github.event_name == 'pull_request'
+        env:
+          GH_TOKEN: ${{ secrets.AGENT_GITHUB_TOKEN }}
+          ACTOR: ${{ github.actor }}
+        run: |
+          if [ -z "$GH_TOKEN" ]; then
+            # Dependabot's runs get no Actions secrets. It bumps versions only, and the licence check reads added
+            # dependencies only, so its pull requests skip with a warning; anything else without the token fails.
+            if [ "$ACTOR" = "dependabot[bot]" ]; then
+              echo "::warning title=Legal check skipped::Dependabot runs without AGENT_GITHUB_TOKEN, so the legal check cannot be fetched."
+              echo "skip=true" >> "$GITHUB_OUTPUT"
+              exit 0
+            fi
+            echo "AGENT_GITHUB_TOKEN is not set (a pull request from a fork gets no secrets), so the legal check cannot be fetched from use-trace/trace." >&2
+            exit 1
+          fi
+          mkdir -p "$RUNNER_TEMP/trace/scripts" "$RUNNER_TEMP/trace/docs/legal"
+          for f in scripts/check-legal-compliance.mjs docs/legal/claims.json; do
+            if ! gh api -H "Accept: application/vnd.github.raw" "repos/use-trace/trace/contents/$f?ref=main" > "$RUNNER_TEMP/trace/$f"; then
+              echo "::error title=Legal check not fetched::AGENT_GITHUB_TOKEN cannot read $f from use-trace/trace. Give the token read access to that repository's contents."
+              exit 1
+            fi
+          done
+      - name: Legal approval
+        id: approval
+        if: github.event_name == 'pull_request' && steps.fetch.outputs.skip != 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          PR: ${{ github.event.pull_request.number }}
+          APPROVERS: ${{ vars.LEGAL_APPROVERS || 'DominicLunarWP' }}
+        run: |
+          approved=false
+          has=$(gh pr view "$PR" --repo "$GITHUB_REPOSITORY" --json labels --jq '[.labels[].name] | any(. == "legal-approved")')
+          actor=$(gh api "repos/$GITHUB_REPOSITORY/issues/$PR/events" --paginate --jq '.[] | select(.event == "labeled" and .label.name == "legal-approved") | .actor.login' | tail -n 1)
+          if [ "$has" = "true" ] && [ -n "$actor" ] && printf ',%s,' "$APPROVERS" | grep -qi ",$actor,"; then approved=true; fi
+          echo "Label present: $has; added by: ${actor:-nobody}; counts: $approved"
+          echo "approved=$approved" >> "$GITHUB_OUTPUT"
+      - name: Legal compliance check
+        id: legal
+        if: github.event_name == 'pull_request' && steps.fetch.outputs.skip != 'true'
+        env:
+          BASE_REF: ${{ github.base_ref }}
+          APPROVED: ${{ steps.approval.outputs.approved }}
+        run: |
+          git fetch --no-tags -q origin "$BASE_REF"
+          args=(--profile trace-sdk-android --base "origin/$BASE_REF" --head HEAD)
+          if [ "$APPROVED" = "true" ]; then args+=(--legal-approved); fi
+          code=0
+          node "$RUNNER_TEMP/trace/scripts/check-legal-compliance.mjs" "${args[@]}" || code=$?
+          # Exit 3: the only problem is the missing label. The next step fails for it, so the review loop waits for
+          # the label instead of starting a fix.
+          if [ "$code" = 3 ]; then echo "awaiting=true" >> "$GITHUB_OUTPUT"; exit 0; fi
+          exit "$code"
+      - name: Waiting for legal-approved
+        if: steps.legal.outputs.awaiting == 'true'
+        run: |
+          echo "::error title=Waiting for legal-approved::An approver adds the legal-approved label. The failed jobs re-run when it is added."
+          exit 1
 
   build:
     name: build

@@ -2,7 +2,15 @@
 
 Each release is also a GitHub release, with its pull request's description as the notes.
 
-## 0.2.0, not yet released
+## 0.2.1, not yet released
+
+- On a US or Other site the referrer is now read at the end of a five second grace period after `initialise`, behind
+  every call the app made in that time, instead of when the site's answer came back. In 0.2.0 whether a stored refusal
+  passed straight after `initialise` came before the read depended on how fast that request returned. A refusal within
+  the five seconds means the referrer is never read; a later one discards it with the first open, unsent. Consent
+  gated sites are unchanged: in 0.2.0 and 0.2.1 the referrer is read only after a yes.
+
+## 0.2.0, 8 October 2026
 
 - On a consent gated site (UK and EU, or no region set) the Play Store install referrer is read only after the
   person says yes, just before the first open is sent. Before an answer the first open waits in memory without it.

@@ -1,0 +1,614 @@
+name: PR loop
+
+# Stage 5 of docs/DELIVERY.md: automated tests and code review, five rounds at most.
+#
+# A round starts when CI finishes on a new head commit of a pull request:
+#   CI failed  -> the fix agent (T06) reads the failure, fixes the cause and pushes, starting the next round
+#   CI passed  -> the review agent (T19, with the T05 rules check) reviews the diff and returns a verdict
+#     approve  -> the review-gate status turns green, so the merge gate can pass
+#     changes  -> the fix agent fixes the blocking findings and pushes, starting the next round
+# A fifth round that still fails or still has findings, a fix that pushes nothing, or a review with no
+# verdict stops the loop: the pull request gets needs-human and review-gate fails. The loop-reset label
+# starts counting again; review-waived passes the gate by hand; legal-approved and tracking-gap-approved
+# re-run the failed CI jobs so their checks see the label. When the branch updater only merges main
+# in, an approval carries over and no round is used. The decisions live in scripts/pr-loop.mjs.
+#
+# Agent steps run code from the pull request, so trusted steps (preflight, Bridge, the decision script)
+# always run from use-trace/trace's main branch, checked out into .trace-loop, and the pull request is checked
+# out only for the agent.
+#
+# Shared with the side repositories (docs/plans/REPO_AUTOMATION.md, decision 4):
+#  - Private ones (trace-shopify-app, trace-wordpress-plugin) call this file:
+#      on: pull_request (types as below) and workflow_run of their CI workflow
+#      jobs: { loop: { uses: use-trace/trace/.github/workflows/pr-loop.yml@main, with: { ci_workflow: ci }, secrets: inherit } }
+#    with the permissions below on the calling workflow.
+#  - Public ones (the SDKs) cannot call a workflow in a private repository, so they keep a byte for byte copy of
+#    this file (their CI workflows are named CI, as here), which reads its inputs from repository variables:
+#    PR_LOOP_REVIEW_RULES, PR_LOOP_FIX_RUNNER, PR_LOOP_FIX_TOOLS and PR_LOOP_FIX_SETUP.
+#    scripts/check-workflow-copies.mjs fails when a copy differs from main.
+# The fixer works in the caller's language: fix_runner (macos-15 for a Swift package), fix_tools (the build and test
+# commands it may run, for example Bash(composer:*) or Bash(./gradlew:*)) and fix_setup (how to install and test).
+# Their defaults are this repository's.
+# Every caller needs CLAUDE_CODE_OAUTH_TOKEN, AGENT_GITHUB_TOKEN, BRIDGE_URL and BRIDGE_RUN_TOKEN. Without them
+# the loop does nothing and says so on the pull request's review-gate status, as it does when AGENT_GITHUB_TOKEN
+# cannot read use-trace/trace, where every trusted step comes from.
+
+on:
+  pull_request:
+    types: [opened, synchronize, reopened, ready_for_review, labeled]
+  workflow_run:
+    workflows: [CI]
+    types: [completed]
+  workflow_call:
+    inputs:
+      ci_workflow:
+        description: The name of the calling repository's CI workflow, whose result starts each round
+        type: string
+        default: CI
+      review_rules:
+        description: What the reviewer and the fixer read first
+        type: string
+        default: CLAUDE.md, every file in .claude/rules, and the merge gate section of docs/DELIVERY.md
+      fix_runner:
+        description: The runner the fixer works on
+        type: string
+        default: ubuntu-24.04
+      fix_tools:
+        description: The build and test commands the fixer may run, as Claude Code allowed tools
+        type: string
+        default: Bash(npm:*),Bash(npx:*),Bash(node:*)
+      fix_setup:
+        description: What the fixer does before any test, after reading the review rules
+        type: string
+        default: In a repository with a package-lock.json, run `npm ci` before any test.
+
+permissions:
+  contents: read
+  pull-requests: write
+  issues: write
+  statuses: write
+  actions: read
+  id-token: write
+
+env:
+  MAX_ROUNDS: "5"
+  GATE: review-gate
+  BRIDGE_URL: ${{ secrets.BRIDGE_URL }}
+  BRIDGE_RUN_TOKEN: ${{ secrets.BRIDGE_RUN_TOKEN }}
+  # Called: the inputs. Run directly (the monorepo, or a public repository's copy): the defaults, or a variable.
+  CI_WORKFLOW: ${{ inputs.ci_workflow || 'CI' }}
+  REVIEW_RULES: ${{ inputs.review_rules || vars.PR_LOOP_REVIEW_RULES || 'CLAUDE.md, every file in .claude/rules, and the merge gate section of docs/DELIVERY.md' }}
+  FIX_TOOLS: ${{ inputs.fix_tools || vars.PR_LOOP_FIX_TOOLS || 'Bash(npm:*),Bash(npx:*),Bash(node:*)' }}
+  FIX_SETUP: ${{ inputs.fix_setup || vars.PR_LOOP_FIX_SETUP || 'In a repository with a package-lock.json, run `npm ci` before any test.' }}
+
+jobs:
+  # The side repositories get the loop before its secrets: until they are set the loop skips, and says why on the
+  # pull request rather than failing or passing the gate.
+  ready:
+    name: loop secrets
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    outputs:
+      ok: ${{ steps.check.outputs.ok }}
+    steps:
+      - name: Skip the loop when its secrets are not set
+        id: check
+        env:
+          GH_TOKEN: ${{ github.token }}
+          CLAUDE_TOKEN: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
+          AGENT_TOKEN: ${{ secrets.AGENT_GITHUB_TOKEN }}
+          SHA: ${{ github.event.pull_request.head.sha }}
+        run: |
+          missing=""
+          [ -n "$CLAUDE_TOKEN" ] || missing="$missing CLAUDE_CODE_OAUTH_TOKEN"
+          [ -n "$AGENT_TOKEN" ] || missing="$missing AGENT_GITHUB_TOKEN"
+          [ -n "$BRIDGE_URL" ] || missing="$missing BRIDGE_URL"
+          [ -n "$BRIDGE_RUN_TOKEN" ] || missing="$missing BRIDGE_RUN_TOKEN"
+          if [ -n "$missing" ]; then
+            reason="Review loop off, secrets not set:$missing"
+          # Every trusted step is checked out from use-trace/trace with this token; a token that cannot see it fails
+          # each round at that checkout instead.
+          elif ! GH_TOKEN="$AGENT_TOKEN" gh api repos/use-trace/trace/contents/scripts/pr-loop.mjs --silent; then
+            reason="Review loop off, AGENT_GITHUB_TOKEN cannot read use-trace/trace"
+          else
+            echo "ok=true" >> "$GITHUB_OUTPUT"; exit 0
+          fi
+          echo "::warning title=Review loop skipped::$reason"
+          echo "$reason" >> "$GITHUB_STEP_SUMMARY"
+          echo "ok=false" >> "$GITHUB_OUTPUT"
+          if [ -n "$SHA" ]; then
+            gh api -X POST "repos/$GITHUB_REPOSITORY/statuses/$SHA" -f state=pending -f context="$GATE" -f description="${reason:0:140}" > /dev/null || true
+          fi
+
+  pending:
+    name: gate pending
+    needs: ready
+    if: >-
+      needs.ready.outputs.ok == 'true'
+      && github.event_name == 'pull_request' && github.event.action != 'labeled'
+      && github.event.pull_request.head.repo.full_name == github.repository
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    env:
+      GH_TOKEN: ${{ github.token }}
+      SHA: ${{ github.event.pull_request.head.sha }}
+      DRAFT: ${{ github.event.pull_request.draft }}
+    steps:
+      - name: Mark the review gate as waiting for this commit
+        run: |
+          if [ "$DRAFT" = "true" ]; then desc="Draft: the loop starts when it is ready for review"; else desc="Waiting for CI, then review (at most $MAX_ROUNDS rounds)"; fi
+          gh api -X POST "repos/$GITHUB_REPOSITORY/statuses/$SHA" -f state=pending -f context="$GATE" -f description="$desc" > /dev/null
+
+  labels:
+    name: loop labels
+    if: >-
+      github.event_name == 'pull_request' && github.event.action == 'labeled'
+      && github.event.pull_request.head.repo.full_name == github.repository
+      && contains(fromJSON('["review-waived","loop-reset","legal-approved","tracking-gap-approved","release-approved"]'), github.event.label.name)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    env:
+      GH_TOKEN: ${{ github.token }}
+      PR: ${{ github.event.pull_request.number }}
+      SHA: ${{ github.event.pull_request.head.sha }}
+      LABEL: ${{ github.event.label.name }}
+      ACTOR: ${{ github.actor }}
+    steps:
+      - name: Waive the gate or reset the loop
+        env:
+          # A person's token, so the CI re-run it starts finishes into a workflow_run this workflow receives.
+          AGENT_TOKEN: ${{ secrets.AGENT_GITHUB_TOKEN }}
+        run: |
+          if [ "$LABEL" = "legal-approved" ] || [ "$LABEL" = "tracking-gap-approved" ] || [ "$LABEL" = "release-approved" ]; then
+            run=$(gh run list --repo "$GITHUB_REPOSITORY" --workflow "$CI_WORKFLOW" --commit "$SHA" --limit 1 --json databaseId,status,conclusion --jq '.[0] | select(.status == "completed" and .conclusion != "success") | .databaseId')
+            if [ -z "$run" ] || [ -z "$AGENT_TOKEN" ]; then echo "Nothing to re-run (CI still running, already green, or no agent token)."; exit 0; fi
+            GH_TOKEN="$AGENT_TOKEN" gh run rerun "$run" --failed --repo "$GITHUB_REPOSITORY"
+            echo "Re-running the failed jobs of CI run $run so they see $LABEL."
+            exit 0
+          fi
+          if [ "$LABEL" = "review-waived" ]; then
+            gh api -X POST "repos/$GITHUB_REPOSITORY/statuses/$SHA" -f state=success -f context="$GATE" -f description="Waived by $ACTOR" > /dev/null
+            gh pr comment "$PR" --repo "$GITHUB_REPOSITORY" --body "The review gate was waived by @$ACTOR for \`${SHA:0:7}\`. CI still has to pass, and the next push starts the loop again."
+            exit 0
+          fi
+          gh pr comment "$PR" --repo "$GITHUB_REPOSITORY" --body "<!-- trace-pr-loop reset -->The PR loop was reset by @$ACTOR. Rounds count again from the next CI result."
+          gh pr edit "$PR" --repo "$GITHUB_REPOSITORY" --remove-label loop-reset || true
+          gh pr edit "$PR" --repo "$GITHUB_REPOSITORY" --remove-label needs-human || true
+          gh api -X POST "repos/$GITHUB_REPOSITORY/statuses/$SHA" -f state=pending -f context="$GATE" -f description="Loop reset; waiting for CI" > /dev/null
+          run=$(gh run list --repo "$GITHUB_REPOSITORY" --workflow "$CI_WORKFLOW" --commit "$SHA" --limit 1 --json databaseId,status --jq '.[0] | select(.status == "completed") | .databaseId')
+          if [ -z "$run" ]; then echo "CI is still running for $SHA; the loop starts when it finishes."; exit 0; fi
+          if [ -z "$AGENT_TOKEN" ]; then echo "AGENT_GITHUB_TOKEN is not set; push a commit to start the loop again."; exit 0; fi
+          GH_TOKEN="$AGENT_TOKEN" gh run rerun "$run" --repo "$GITHUB_REPOSITORY"
+          echo "Re-running CI run $run"
+
+  round:
+    name: round
+    needs: ready
+    if: >-
+      needs.ready.outputs.ok == 'true'
+      && github.event_name == 'workflow_run'
+      && github.event.workflow_run.event == 'pull_request'
+      && github.event.workflow_run.head_repository.full_name == github.repository
+      && github.event.workflow_run.head_branch != 'main'
+      && github.event.workflow_run.conclusion != 'cancelled'
+      && github.event.workflow_run.conclusion != 'skipped'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    concurrency:
+      group: pr-loop-${{ github.event.workflow_run.head_branch }}
+      cancel-in-progress: false
+    outputs:
+      action: ${{ steps.decide.outputs.action }}
+      round: ${{ steps.decide.outputs.round }}
+      pr: ${{ steps.decide.outputs.pr }}
+    env:
+      GH_TOKEN: ${{ github.token }}
+      BRANCH: ${{ github.event.workflow_run.head_branch }}
+      SHA: ${{ github.event.workflow_run.head_sha }}
+      CI_RESULT: ${{ github.event.workflow_run.conclusion }}
+      RUN_URL: ${{ github.event.workflow_run.html_url }}
+      RUN_ID: ${{ github.event.workflow_run.id }}
+      RUN_NAME: ${{ github.event.workflow_run.name }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: Check out the loop's trusted scripts
+        uses: actions/checkout@v4
+        with:
+          repository: use-trace/trace
+          ref: main
+          path: .trace-loop
+          sparse-checkout: |
+            scripts
+            .github/actions
+          token: ${{ secrets.AGENT_GITHUB_TOKEN || github.token }}
+          persist-credentials: false
+      - name: Decide this round
+        id: decide
+        run: |
+          status() { gh api -X POST "repos/$GITHUB_REPOSITORY/statuses/$SHA" -f state="$1" -f context="$GATE" -f description="$2" -f target_url="$RUN_URL" > /dev/null; }
+          pr=$(gh pr list --repo "$GITHUB_REPOSITORY" --head "$BRANCH" --state open --json number,headRefOid,isDraft,baseRefName --jq '.[0] // empty')
+          if [ -z "$pr" ]; then echo "No open pull request for this branch."; echo "action=skip" >> "$GITHUB_OUTPUT"; exit 0; fi
+          number=$(jq -r .number <<< "$pr")
+          echo "pr=$number" >> "$GITHUB_OUTPUT"
+          if [ "$(jq -r .headRefOid <<< "$pr")" != "$SHA" ]; then echo "CI finished for an older commit; the newer run decides."; echo "action=skip" >> "$GITHUB_OUTPUT"; exit 0; fi
+          if [ "$(jq -r .isDraft <<< "$pr")" = "true" ]; then status pending "Draft: the loop starts when it is ready for review"; echo "action=skip" >> "$GITHUB_OUTPUT"; exit 0; fi
+
+          labels=$(gh pr view "$number" --repo "$GITHUB_REPOSITORY" --json labels --jq '[.labels[].name] | join(",")')
+          gh api "repos/$GITHUB_REPOSITORY/issues/$number/comments" --paginate --jq '.[] | {author: .user.login, body}' > "$RUNNER_TEMP/comments.jsonl"
+
+          # An approval carries over a commit that only merges main in with no conflict resolution.
+          clean=false
+          cleanparent=""
+          git cat-file -e "$SHA^{commit}" 2> /dev/null || git fetch --no-tags -q origin "$SHA" || true
+          read -r _ p1 p2 _ <<< "$(git rev-list --parents -n 1 "$SHA" 2> /dev/null) "
+          # The merged in parent must be on the pull request's own base.
+          base=$(jq -r .baseRefName <<< "$pr")
+          git fetch --no-tags -q origin "+refs/heads/$base:refs/remotes/origin/$base" || true
+          if [ -n "${p2:-}" ] && git merge-base --is-ancestor "$p2" "origin/$base" && [ -z "$(git show --remerge-diff --format= "$SHA")" ]; then
+            # Also the commit it merged onto, so a clean merge after a review asked for changes waits for the fix.
+            cleanparent="$p1"
+            # Look back through clean base merges to the reviewed commit: when the base is merged in twice before CI
+            # finishes, the merge in between never gets a gate status. On 11 September 2026 #145 lost its round 5
+            # approval that way and stopped. The commit found is also where a changes verdict is looked up.
+            for _ in 1 2 3 4 5 6 7 8 9 10; do
+              previous=$(gh api "repos/$GITHUB_REPOSITORY/commits/$cleanparent/statuses" --jq "[.[] | select(.context == \"$GATE\")][0].state // empty")
+              if [ "$previous" = "success" ]; then clean=true; break; fi
+              read -r _ q1 q2 _ <<< "$(git rev-list --parents -n 1 "$cleanparent" 2> /dev/null) "
+              if [ -n "${q2:-}" ] && git merge-base --is-ancestor "$q2" "origin/$base" && [ -z "$(git show --remerge-diff --format= "$cleanparent")" ]; then
+                cleanparent="$q1"
+              else
+                break
+              fi
+            done
+          fi
+
+          # The failed jobs and their failed steps, so a run that only waits for an approval label uses no round.
+          # If they cannot be read, the run counts as an ordinary failure.
+          echo '[]' > "$RUNNER_TEMP/failed-jobs.json"
+          if [ "$CI_RESULT" = "failure" ]; then
+            if ! gh api "repos/$GITHUB_REPOSITORY/actions/runs/$RUN_ID/jobs" --paginate \
+              --jq '.jobs[] | select(.conclusion == "failure") | {name, failedSteps: [.steps[] | select(.conclusion == "failure") | .name]}' \
+              | jq -s . > "$RUNNER_TEMP/failed-jobs.json"; then
+              echo '[]' > "$RUNNER_TEMP/failed-jobs.json"
+            fi
+          fi
+
+          node .trace-loop/scripts/pr-loop.mjs decide --comments "$RUNNER_TEMP/comments.jsonl" --sha "$SHA" --ci "$CI_RESULT" \
+            --labels "$labels" --clean-merge-approved "$clean" --clean-merge-parent "$cleanparent" --failed-jobs "$RUNNER_TEMP/failed-jobs.json" \
+            --max "$MAX_ROUNDS" --ci-name "$CI_WORKFLOW" --run-name "$RUN_NAME" > "$RUNNER_TEMP/decision.json"
+          cat "$RUNNER_TEMP/decision.json"
+          action=$(jq -r .action "$RUNNER_TEMP/decision.json")
+          if [ "$action" = "skip" ]; then echo "action=skip" >> "$GITHUB_OUTPUT"; exit 0; fi
+          round=$(jq -r '.round // empty' "$RUNNER_TEMP/decision.json")
+          gate=$(jq -r .gate "$RUNNER_TEMP/decision.json")
+          desc=$(jq -r .description "$RUNNER_TEMP/decision.json")
+          add=$(jq -r '.addLabel // empty' "$RUNNER_TEMP/decision.json")
+
+          if [ "$(jq -r '.newRound // false' "$RUNNER_TEMP/decision.json")" = "true" ]; then
+            gh pr comment "$number" --repo "$GITHUB_REPOSITORY" --body "<!-- trace-pr-loop round=$round sha=$SHA -->**PR loop, round $round of $MAX_ROUNDS** for \`${SHA:0:7}\`: CI $CI_RESULT ([run]($RUN_URL)). $desc."
+          fi
+          if [ -n "$add" ]; then
+            gh pr edit "$number" --repo "$GITHUB_REPOSITORY" --add-label "$add"
+            gh pr comment "$number" --repo "$GITHUB_REPOSITORY" --body "The PR loop stopped: $desc. A person needs to look. Add loop-reset to start the loop again, or review-waived to pass the review gate by hand."
+          fi
+          if [ "$action" = "wait" ]; then
+            mark="<!-- trace-pr-loop waiting sha=$SHA -->"
+            if ! jq -e --arg bot "github-actions[bot]" --arg m "$mark" 'select(.author == $bot and (.body | contains($m)))' "$RUNNER_TEMP/comments.jsonl" > /dev/null; then
+              gh pr comment "$number" --repo "$GITHUB_REPOSITORY" --body "$mark**PR loop** for \`${SHA:0:7}\`: $desc. When a person adds the label, the failed checks re-run and the loop carries on."
+            fi
+          fi
+          if [ "$action" = "await-fix" ]; then
+            # Carries the changes verdict onto this merge commit, so a further clean merge before the fix lands still
+            # finds it one hop back instead of only the commit the review actually ran on (#160, walking the chain).
+            mark="<!-- trace-review-verdict sha=$SHA verdict=changes -->"
+            if ! jq -e --arg bot "github-actions[bot]" --arg m "$mark" 'select(.author == $bot and (.body | contains($m)))' "$RUNNER_TEMP/comments.jsonl" > /dev/null; then
+              gh pr comment "$number" --repo "$GITHUB_REPOSITORY" --body "$mark**PR loop** for \`${SHA:0:7}\`: $desc"
+            fi
+          fi
+          status "$gate" "$desc"
+          echo "action=$action" >> "$GITHUB_OUTPUT"
+          echo "round=$round" >> "$GITHUB_OUTPUT"
+
+  review:
+    name: review
+    needs: round
+    if: needs.round.outputs.action == 'review'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 50
+    outputs:
+      next: ${{ steps.verdict.outputs.next }}
+      findings: ${{ steps.verdict.outputs.findings }}
+    env:
+      GH_TOKEN: ${{ github.token }}
+      PR: ${{ needs.round.outputs.pr }}
+      ROUND: ${{ needs.round.outputs.round }}
+      SHA: ${{ github.event.workflow_run.head_sha }}
+      RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+    steps:
+      - name: Check out the loop's trusted scripts
+        uses: actions/checkout@v4
+        with:
+          repository: use-trace/trace
+          ref: main
+          path: .trace-loop
+          sparse-checkout: |
+            scripts
+            .github/actions
+          token: ${{ secrets.AGENT_GITHUB_TOKEN || github.token }}
+          persist-credentials: false
+      - name: Keep the decision script from the default branch
+        run: cp .trace-loop/scripts/pr-loop.mjs "$RUNNER_TEMP/pr-loop.mjs"
+      - name: Agent preflight
+        id: pre
+        uses: ./.trace-loop/.github/actions/agent-preflight
+        with:
+          agent: T19
+          claude_token: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
+          github_token: ${{ secrets.AGENT_GITHUB_TOKEN }}
+      - name: Bridge switch
+        id: switch
+        uses: ./.trace-loop/.github/actions/bridge-agent
+        with:
+          agent: T19
+          mode: check
+      - name: Fail the gate when the reviewer cannot run
+        if: steps.pre.outputs.ready != 'true' || steps.switch.outputs.enabled == 'false'
+        env:
+          REASON: ${{ steps.pre.outputs.reason || 'the T19 reviewer is switched off in Bridge' }}
+        run: |
+          gh api -X POST "repos/$GITHUB_REPOSITORY/statuses/$SHA" -f state=failure -f context="$GATE" -f description="The reviewer could not run; see the pull request" -f target_url="$RUN_URL" > /dev/null
+          gh pr comment "$PR" --repo "$GITHUB_REPOSITORY" --body "The review could not run in round $ROUND: $REASON. Fix that and add loop-reset, or add review-waived to pass the gate by hand."
+      # A large pull request needs more turns to read. On 11 September 2026 #140 (53 files) ran out of 60 turns twice
+      # and returned no verdict, which stops the loop. 60 turns up to 20 files, 120 up to 60, 180 beyond.
+      - name: Size the review
+        id: size
+        if: steps.pre.outputs.ready == 'true' && steps.switch.outputs.enabled != 'false'
+        run: |
+          files=$(gh pr view "$PR" --repo "$GITHUB_REPOSITORY" --json changedFiles --jq .changedFiles 2>/dev/null || echo 0)
+          turns=60
+          if [ "${files:-0}" -gt 20 ]; then turns=120; fi
+          if [ "${files:-0}" -gt 60 ]; then turns=180; fi
+          echo "turns=$turns" >> "$GITHUB_OUTPUT"
+      - uses: actions/checkout@v4
+        if: steps.pre.outputs.ready == 'true' && steps.switch.outputs.enabled != 'false'
+        with:
+          ref: ${{ github.event.workflow_run.head_sha }}
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Review
+        id: claude
+        if: steps.pre.outputs.ready == 'true' && steps.switch.outputs.enabled != 'false'
+        continue-on-error: true
+        uses: anthropics/claude-code-action@v1
+        env:
+          GH_TOKEN: ${{ secrets.AGENT_GITHUB_TOKEN || github.token }}
+        with:
+          claude_code_oauth_token: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
+          github_token: ${{ secrets.AGENT_GITHUB_TOKEN || github.token }}
+          prompt: |
+            You are the pull request reviewer for Trace (usetrace.io), a privacy first marketing attribution product. Tracking quality and accuracy come first: a change that could make Trace record, stitch, attribute, count or value visitors wrongly is the most serious kind of defect.
+
+            Pull request #${{ needs.round.outputs.pr }} in ${{ github.repository }}, head commit ${{ github.event.workflow_run.head_sha }}, loop round ${{ needs.round.outputs.round }} of ${{ env.MAX_ROUNDS }}. CI has passed on this commit.
+
+            1. Read ${{ env.REVIEW_RULES }}.
+            2. Read the pull request and its earlier review rounds with `gh pr view ${{ needs.round.outputs.pr }} --comments`, and the diff with `gh pr diff ${{ needs.round.outputs.pr }}`. The working tree is the head commit; read the surrounding code wherever the diff needs context. Check that every blocking finding from earlier rounds is fixed.
+               Your only tools are `gh pr diff`, `gh pr view`, `git diff`, `git log`, `git show`, Read, Grep and Glob: read files with Read, find them with Glob and search with Grep, never cat, ls, sed or other shell commands, which are refused and waste a turn. For a large diff, list the files with `gh pr diff ${{ needs.round.outputs.pr }} --name-only` and read the changes a file at a time with `git diff origin/${{ github.event.workflow_run.pull_requests[0].base.ref || 'main' }}...HEAD -- <path>`.
+            3. Look for these blocking problems:
+               - Tracking accuracy and data quality: ingestion, identity and stitching, sessions, channel attribution, conversions and their values, deduplication, consent gating, quarantine, purge, retention, and every figure a customer sees. Look for double counting, lost or dropped events, wrong keys, time zone and window errors, and silent behaviour changes.
+               - Tracking tests: a change to tracking, consent or attribution code without a test that would catch it breaking; a loosened golden value in apps/dashboard/e2e/tracking/journeys.ts; a new knownGap, test.fixme or test.skip; a removed journey.
+               - Privacy and consent: a visitor identity, cookie value, IP address or API key in a log line, error, fixture or response; a way around consent; a UK or EU visitor tracked without consent.
+               - Legal compliance: a customer or visitor facing claim that is not true or not approved in docs/legal/claims.json; new browser storage, data fields, processors or data flows that docs/legal/storage.json, docs/legal/processors.json or the privacy notice do not cover; changes to what Trace keeps, shares, deletes or tells people, or to consent defaults, without a clear legal basis; personal data leaving the UK or EU without a stated safeguard. Read docs/legal/README.md.
+               - Security: missing authorisation, secrets in code or logs, injection, requests to addresses a caller controls.
+               - Correctness: logic errors, unhandled errors that lose data, races, migrations that are not safe to run again on every start.
+               - Repository rules: a bug fix without a failing test first, a critical path change without its Playwright spec, em or en dashes in UI copy.
+               Style, naming and small improvements do not block. Leave them out, or post them as inline comments starting with "Nit:".
+            4. Post each blocking finding as an inline comment on its line with mcp__github_inline_comment__create_inline_comment, starting with "Blocking:".
+            5. Do not post a general pull request comment; the workflow posts your verdict. End with a final message in exactly one of these shapes and nothing after it:
+
+            VERDICT: approve
+            FINDINGS:
+            None.
+
+            VERDICT: changes
+            FINDINGS:
+            1. path/to/file.ts:123: what is wrong, why it matters, and the fix.
+
+            Approve only when there are no blocking findings.
+          claude_args: |
+            --model ${{ vars.PR_LOOP_MODEL || 'claude-sonnet-5' }}
+            --max-turns ${{ steps.size.outputs.turns || '60' }}
+            --allowedTools "mcp__github_inline_comment__create_inline_comment,Bash(gh pr diff:*),Bash(gh pr view:*),Bash(git diff:*),Bash(git log:*),Bash(git show:*),Read,Grep,Glob"
+      - name: Check out the loop's trusted scripts again
+        if: always() && steps.claude.outcome != 'skipped'
+        uses: actions/checkout@v4
+        with:
+          repository: use-trace/trace
+          ref: main
+          path: .trace-loop
+          sparse-checkout: |
+            scripts
+            .github/actions
+          token: ${{ secrets.AGENT_GITHUB_TOKEN || github.token }}
+          persist-credentials: false
+      - name: Post the verdict and set the gate
+        id: verdict
+        if: always() && steps.claude.outcome != 'skipped'
+        env:
+          EXECUTION_FILE: ${{ steps.claude.outputs.execution_file }}
+        run: |
+          node "$RUNNER_TEMP/pr-loop.mjs" review --execution-file "${EXECUTION_FILE:-/nonexistent}" --sha "$SHA" --round "$ROUND" --max "$MAX_ROUNDS" > "$RUNNER_TEMP/review.json"
+          jq -r .comment "$RUNNER_TEMP/review.json" > "$RUNNER_TEMP/verdict.md"
+          gh pr comment "$PR" --repo "$GITHUB_REPOSITORY" --body-file "$RUNNER_TEMP/verdict.md"
+          add=$(jq -r '.addLabel // empty' "$RUNNER_TEMP/review.json")
+          if [ -n "$add" ]; then gh pr edit "$PR" --repo "$GITHUB_REPOSITORY" --add-label "$add"; fi
+          gh api -X POST "repos/$GITHUB_REPOSITORY/statuses/$SHA" -f state="$(jq -r .gate "$RUNNER_TEMP/review.json")" \
+            -f context="$GATE" -f description="$(jq -r .description "$RUNNER_TEMP/review.json")" -f target_url="$RUN_URL" > /dev/null
+          echo "next=$(jq -r .next "$RUNNER_TEMP/review.json")" >> "$GITHUB_OUTPUT"
+          {
+            echo "findings<<TRACE_FINDINGS_END"
+            jq -r .findings "$RUNNER_TEMP/review.json"
+            echo "TRACE_FINDINGS_END"
+          } >> "$GITHUB_OUTPUT"
+      - name: Log T19
+        if: always()
+        uses: ./.trace-loop/.github/actions/bridge-agent
+        with:
+          agent: T19
+          mode: report
+          outcome: ${{ steps.claude.outcome == 'failure' && 'fail' || 'ok' }}
+          detail: "${{ format('PR {0} round {1}: review {2}, next {3}', needs.round.outputs.pr, needs.round.outputs.round, steps.claude.outcome, steps.verdict.outputs.next) }}"
+          trigger: github workflow_run
+      - name: Log T05
+        if: always()
+        uses: ./.trace-loop/.github/actions/bridge-agent
+        with:
+          agent: T05
+          mode: report
+          outcome: ${{ steps.claude.outcome == 'failure' && 'fail' || 'ok' }}
+          detail: "${{ format('PR {0}: rules check ran with the T19 review ({1})', needs.round.outputs.pr, steps.claude.outcome) }}"
+          trigger: github workflow_run
+
+  fix:
+    name: fix
+    needs: [round, review]
+    if: >-
+      always() && needs.round.result == 'success'
+      && (needs.round.outputs.action == 'fix-ci' || needs.review.outputs.next == 'fix')
+    # A Swift package builds and tests on macOS only.
+    runs-on: ${{ inputs.fix_runner || vars.PR_LOOP_FIX_RUNNER || 'ubuntu-24.04' }}
+    timeout-minutes: 60
+    env:
+      GH_TOKEN: ${{ github.token }}
+      PR: ${{ needs.round.outputs.pr }}
+      ROUND: ${{ needs.round.outputs.round }}
+      SHA: ${{ github.event.workflow_run.head_sha }}
+      BRANCH: ${{ github.event.workflow_run.head_branch }}
+      RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+    steps:
+      - name: Check out the loop's trusted scripts
+        uses: actions/checkout@v4
+        with:
+          repository: use-trace/trace
+          ref: main
+          path: .trace-loop
+          sparse-checkout: |
+            scripts
+            .github/actions
+          token: ${{ secrets.AGENT_GITHUB_TOKEN || github.token }}
+          persist-credentials: false
+      - name: Agent preflight
+        id: pre
+        uses: ./.trace-loop/.github/actions/agent-preflight
+        with:
+          agent: T06
+          claude_token: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
+          github_token: ${{ secrets.AGENT_GITHUB_TOKEN }}
+      - name: Bridge switch
+        id: switch
+        uses: ./.trace-loop/.github/actions/bridge-agent
+        with:
+          agent: T06
+          mode: check
+      - name: Stop the loop when the fixer cannot run
+        if: steps.pre.outputs.ready != 'true' || steps.switch.outputs.enabled == 'false'
+        env:
+          REASON: ${{ steps.pre.outputs.reason || 'the T06 fixer is switched off in Bridge' }}
+        run: |
+          gh api -X POST "repos/$GITHUB_REPOSITORY/statuses/$SHA" -f state=failure -f context="$GATE" -f description="The fixer could not run; see the pull request" -f target_url="$RUN_URL" > /dev/null
+          gh pr edit "$PR" --repo "$GITHUB_REPOSITORY" --add-label needs-human
+          gh pr comment "$PR" --repo "$GITHUB_REPOSITORY" --body "Round $ROUND needed a fix, but the fixer could not run: $REASON. A person needs to look; add loop-reset once it is fixed."
+      - uses: actions/checkout@v4
+        if: steps.pre.outputs.ready == 'true' && steps.switch.outputs.enabled != 'false'
+        with:
+          ref: ${{ github.event.workflow_run.head_branch }}
+          # The push must come from a token that starts workflows, or the loop ends after one round.
+          token: ${{ secrets.AGENT_GITHUB_TOKEN || github.token }}
+          fetch-depth: 0
+      # A repository without .nvmrc (the plugin, the SDKs) uses the runner's own PHP and Composer, Java or Xcode.
+      - uses: actions/setup-node@v4
+        if: steps.pre.outputs.ready == 'true' && steps.switch.outputs.enabled != 'false' && hashFiles('.nvmrc') != ''
+        with:
+          node-version-file: .nvmrc
+          cache: npm
+      - name: Fix
+        id: claude
+        if: steps.pre.outputs.ready == 'true' && steps.switch.outputs.enabled != 'false'
+        continue-on-error: true
+        uses: anthropics/claude-code-action@v1
+        env:
+          GH_TOKEN: ${{ secrets.AGENT_GITHUB_TOKEN || github.token }}
+        with:
+          claude_code_oauth_token: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
+          github_token: ${{ secrets.AGENT_GITHUB_TOKEN || github.token }}
+          prompt: |
+            You are fixing pull request #${{ needs.round.outputs.pr }} in ${{ github.repository }}, branch ${{ github.event.workflow_run.head_branch }}, head commit ${{ github.event.workflow_run.head_sha }}, loop round ${{ needs.round.outputs.round }} of ${{ env.MAX_ROUNDS }}. Trace's first priority is tracking quality and accuracy.
+
+            Why you are here: ${{ needs.round.outputs.action == 'fix-ci' && 'CI failed on this commit.' || 'CI passed, and the review found blocking problems.' }}
+
+            Read ${{ env.REVIEW_RULES }} first. ${{ env.FIX_SETUP }}
+
+            When CI failed: the run is ${{ github.event.workflow_run.html_url }} (id ${{ github.event.workflow_run.id }}).
+            1. Read the failure with `gh run view ${{ github.event.workflow_run.id }} --log-failed` and find the failing job, suite and assertion.
+            2. Reproduce it with the matching command from CLAUDE.md. The tracking-quality job runs the tracking truth suite and the consent spec in Playwright with E2E_SUITE=tracking against the full stack; reproduce its unit parts locally and read its log for the browser part.
+            3. Fix the root cause with the smallest diff. If an expectation is wrong because of an intended change on this branch, fix the test; if it is a product bug, fix the product and keep or add the test that catches it. If a test passed on its retry or is a timing race in the test itself, fix the test's waiting, not the product.
+
+            When the review found problems, these are its blocking findings:
+            ${{ needs.review.outputs.findings }}
+            Also read the inline review comments that start with "Blocking:" (`gh pr view ${{ needs.round.outputs.pr }} --comments`). Fix every blocking finding. When a finding is wrong, reply with `gh pr comment ${{ needs.round.outputs.pr }} --body "..."` saying why, and leave that code as it is.
+
+            In both cases:
+            - Never loosen a golden value, add a knownGap, test.fixme or test.skip, or remove a journey to make tracking tests pass. Find out why Trace concluded something different and fix that.
+            - For anything under apps/api/src/tim, apps/api/src/consent, apps/api/src/privacy or apps/dashboard/lib/trace-snippet, follow docs/CONSENT_REMEDIATION.md and run the consent suites listed in .claude/rules/consent.md.
+            - Run the affected suites until they pass.
+            - Commit with `git commit -m "pr-loop: <what and why>"` and push with `git push origin HEAD`. The push starts the next round.
+            - If no code change can fix it (a runner, a network fetch, a missing secret), do not commit. Explain on the pull request with `gh pr comment` and stop.
+          claude_args: |
+            --model ${{ vars.PR_LOOP_MODEL || 'claude-sonnet-5' }}
+            --max-turns 60
+            --allowedTools "${{ env.FIX_TOOLS }},Bash(gh run view:*),Bash(gh pr view:*),Bash(gh pr comment:*),Bash(git add:*),Bash(git commit:*),Bash(git push:*),Bash(git status:*),Bash(git diff:*),Bash(git log:*),Read,Edit,Write,Glob,Grep"
+      - name: Stop the loop when the fix pushed nothing
+        if: always() && steps.pre.outputs.ready == 'true' && steps.switch.outputs.enabled != 'false'
+        run: |
+          # Only the fixer's own commit counts. The branch updater can move the branch while the fixer works, which made
+          # the old head comparison pass after a rejected push; merge the branch in and push again once when that happens.
+          local=$(git rev-parse HEAD)
+          if [ "$local" != "$SHA" ]; then
+            git fetch --no-tags -q origin "$BRANCH"
+            if ! git merge-base --is-ancestor "$local" "origin/$BRANCH"; then
+              git config user.name "github-actions[bot]"
+              git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+              if git merge --no-edit -q "origin/$BRANCH"; then git push -q origin HEAD || true; else git merge --abort || true; fi
+              git fetch --no-tags -q origin "$BRANCH"
+              local=$(git rev-parse HEAD)
+            fi
+            if git merge-base --is-ancestor "$local" "origin/$BRANCH"; then echo "The fix is on the branch; CI starts the next round."; exit 0; fi
+            what="the fixer's commit could not be pushed to the branch"
+          else
+            what="the fixer finished without committing a change"
+          fi
+          gh api -X POST "repos/$GITHUB_REPOSITORY/statuses/$SHA" -f state=failure -f context="$GATE" -f description="Round $ROUND: the fix is not on the branch" -f target_url="$RUN_URL" > /dev/null
+          gh pr edit "$PR" --repo "$GITHUB_REPOSITORY" --add-label needs-human
+          gh pr comment "$PR" --repo "$GITHUB_REPOSITORY" --body "Round $ROUND: $what ([run]($RUN_URL)). A person needs to look; add loop-reset to start the loop again."
+      - name: Check out the loop's trusted scripts again
+        if: always()
+        uses: actions/checkout@v4
+        with:
+          repository: use-trace/trace
+          ref: main
+          path: .trace-loop
+          sparse-checkout: |
+            scripts
+            .github/actions
+          token: ${{ secrets.AGENT_GITHUB_TOKEN || github.token }}
+          persist-credentials: false
+      - name: Log T06
+        if: always()
+        uses: ./.trace-loop/.github/actions/bridge-agent
+        with:
+          agent: T06
+          mode: report
+          outcome: ${{ steps.claude.outcome == 'failure' && 'fail' || 'ok' }}
+          detail: "${{ format('PR {0} round {1}: fix {2}', needs.round.outputs.pr, needs.round.outputs.round, steps.claude.outcome) }}"
+          trigger: github workflow_run

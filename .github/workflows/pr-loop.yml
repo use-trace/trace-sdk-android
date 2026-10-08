@@ -527,7 +527,7 @@ jobs:
           token: ${{ secrets.AGENT_GITHUB_TOKEN || github.token }}
           fetch-depth: 0
       # A repository without .nvmrc (the plugin, the SDKs) uses the runner's own PHP and Composer, Java or Xcode.
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@v6
         if: steps.pre.outputs.ready == 'true' && steps.switch.outputs.enabled != 'false' && hashFiles('.nvmrc') != ''
         with:
           node-version-file: .nvmrc

@@ -89,9 +89,14 @@ class FirstOpenEndToEndTest {
         Trace.conversion("purchase", value = 30.0, currency = "GBP")
         Trace.awaitIdle()
 
-        // Nothing at all while the banner is unanswered. Hold, then send: an event sent before the person answered
-        // cannot be unsent, and the server deleting it afterwards is not the same as never having had it.
-        assertEquals("nothing may be sent while consent is unknown", emptyList<String>(), api.requests.map { it.path })
+        // Nothing about the person while the banner is unanswered. Hold, then send: an event sent before the person
+        // answered cannot be unsent, and the server deleting it afterwards is not the same as never having had it.
+        // Only the site is asked whether it is consent gated, which carries nothing about anybody.
+        assertEquals(
+            "nothing may be sent while consent is unknown",
+            listOf("/v1/snippet-config?key=$apiKey"),
+            api.requests.map { it.path },
+        )
 
         Trace.setConsent(analytics = true, marketing = false)
         Trace.awaitIdle()
@@ -100,14 +105,16 @@ class FirstOpenEndToEndTest {
         assertNotNull("the grant should have minted an install id", installId)
 
         // The sequence, not the set. The consent call first, because the server takes the key from it when it
-        // replays what it buffered.
-        assertEquals(listOf("/v1/consent", "/v1/event", "/v1/event"), api.requests.map { it.path })
+        // replays what it buffered. The stub gives no site rule, which reads as gated, so the referrer was read at
+        // the grant and the first open still carries it.
+        val sent = api.requests.drop(1)
+        assertEquals(listOf("/v1/consent", "/v1/event", "/v1/event"), sent.map { it.path })
 
-        val consent = api.requests[0].json()
+        val consent = sent[0].json()
         assertEquals("the consent call carries the install id or the server mints one", installId, consent.getString("anon_user_key"))
         assertTrue(consent.getBoolean("consent_analytics"))
 
-        val firstOpen = api.requests[1].json()
+        val firstOpen = sent[1].json()
         assertEquals("FIRST_OPEN", firstOpen.getString("event_type"))
         assertEquals("app", firstOpen.getString("source_type"))
         assertEquals("android", firstOpen.getString("platform"))
@@ -118,21 +125,21 @@ class FirstOpenEndToEndTest {
         assertEquals(referrer, firstOpen.getString("install_referrer"))
         assertEquals(installId, firstOpen.getString("anon_user_key"))
 
-        val conversion = api.requests[2].json()
+        val conversion = sent[2].json()
         assertEquals("PURCHASE", conversion.getString("event_type"))
         assertEquals("purchase", conversion.getString("event_name"))
         assertEquals(30.0, conversion.getDouble("value"), 0.0)
         assertEquals("GBP", conversion.getJSONObject("metadata").getString("currency"))
         assertEquals("one install, so one key on all three", installId, conversion.getString("anon_user_key"))
 
-        api.requests.forEach {
+        sent.forEach {
             assertEquals(apiKey, it.header("x-trace-api-key"))
             // An empty user agent is read as a bot and the event is dropped behind a 200, so this is the one
             // header whose absence is invisible from the client side.
             assertTrue("an empty user agent is read as a bot", it.header("user-agent").orEmpty().isNotBlank())
         }
 
-        assertEquals("a launch sends three requests and no fourth", 3, api.requests.size)
+        assertEquals("a launch asks the site, then sends three requests and no fifth", 4, api.requests.size)
     }
 
     @Test

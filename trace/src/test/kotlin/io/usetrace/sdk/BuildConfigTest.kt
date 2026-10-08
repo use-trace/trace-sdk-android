@@ -11,6 +11,6 @@ class BuildConfigTest {
 
     @Test
     fun `the sdk version is the published version`() {
-        assertEquals("0.1.0", BuildConfig.SDK_VERSION)
+        assertEquals("0.2.0", BuildConfig.SDK_VERSION)
     }
 }

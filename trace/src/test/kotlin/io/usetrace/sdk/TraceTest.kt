@@ -52,10 +52,14 @@ class TraceTest {
         TraceLog.redirect(null)
     }
 
-    /** What the SDK asked the network to do, in order, and on which thread it asked. */
-    private class RecordingSender : EventSender {
+    /**
+     * What the SDK asked the network to do, in order, and on which thread it asked. [gated] is what the site's config
+     * says, null for no answer (offline, or an older API).
+     */
+    private class RecordingSender(private val gated: Boolean? = null) : EventSender {
 
         val calls = mutableListOf<String>()
+        var configAsked = 0
         val events = mutableListOf<Event>()
         val consentKeys = mutableListOf<String>()
         val threads = mutableSetOf<String>()
@@ -80,7 +84,18 @@ class TraceTest {
             threads.add(Thread.currentThread().name)
             true
         }
+
+        // A real request takes a moment, as the network does, which is what lets the answer a host app passes
+        // straight after initialise arrive before the SDK decides whether to read the referrer.
+        override fun consentGated(): Boolean? {
+            Thread.sleep(50)
+            synchronized(this) { configAsked++ }
+            return gated
+        }
     }
+
+    /** How many times the SDK asked the Play Store for the referrer. */
+    private var referrerReads = 0
 
     private fun config(debugLogging: Boolean = true) =
         TraceConfig(apiKey = "trc_test_key", apiUrl = "http://127.0.0.1:9", debugLogging = debugLogging)
@@ -97,10 +112,107 @@ class TraceTest {
         answers: Boolean = true,
         debugLogging: Boolean = true,
     ) {
-        Trace.initialise(context, config(debugLogging), sender) { _, onResult ->
+        Trace.initialise(context, config(debugLogging), sender, playClient(referrer, answers))
+        Trace.awaitIdle()
+    }
+
+    private fun playClient(referrer: String? = raw, answers: Boolean = true): (Context, (String?) -> Unit) -> Unit =
+        { _, onResult ->
+            referrerReads++
             if (answers) onResult(referrer)
         }
+
+    // The legal adviser's answer, decided by Dom on 8 October 2026: any storage on or access to the device needs
+    // consent where consent is required (PECR regulation 6, ePrivacy article 5(3)), and reading the Play Store's
+    // install referrer is access to information held on it. Like the website tag and the iOS SDK, the SDK follows the
+    // site's region: on a consent gated site (UK and EU, or no region) the referrer is read only after a yes; on a US
+    // or Other site it is read at launch unless the person refused. No answer from the site is gated. Play keeps the
+    // referrer for 90 days, so a later yes still reads it.
+
+    @Test
+    fun `on a gated site, or one that cannot be asked, the referrer is not read before an answer`() {
+        for (gated in listOf(true, null)) {
+            Trace.resetForTest()
+            referrerReads = 0
+            val sender = RecordingSender(gated)
+
+            initialise(sender, referrer = raw)
+            Trace.conversion("purchase", value = 30.0)
+            Trace.awaitIdle()
+
+            assertEquals("gated=$gated: no read of the device before consent", 0, referrerReads)
+            assertEquals(emptyList<String>(), written())
+        }
+    }
+
+    @Test
+    fun `on a gated site a yes reads the referrer, and the first open carries it`() {
+        val sender = RecordingSender(gated = true)
+        initialise(sender, referrer = raw)
+
+        Trace.setConsent(analytics = true)
         Trace.awaitIdle()
+
+        assertEquals(1, referrerReads)
+        assertEquals(listOf("consent analytics=true marketing=false", "event FIRST_OPEN"), sender.calls)
+        assertEquals(raw, sender.events.single().installReferrer)
+    }
+
+    @Test
+    fun `a refusal never reads the referrer, in either region`() {
+        for (gated in listOf(true, false)) {
+            Trace.resetForTest()
+            referrerReads = 0
+
+            Trace.initialise(context, config(), RecordingSender(gated), playClient())
+            Trace.setConsent(analytics = false)
+            Trace.awaitIdle()
+
+            assertEquals("gated=$gated: the answer passed at launch comes before the read", 0, referrerReads)
+        }
+    }
+
+    @Test
+    fun `on a site that is not gated the referrer is read at launch, before an answer`() {
+        val sender = RecordingSender(gated = false)
+        initialise(sender, referrer = raw)
+        assertEquals(1, referrerReads)
+
+        Trace.setConsent(analytics = true)
+        Trace.awaitIdle()
+
+        assertEquals("read once, not again at the grant", 1, referrerReads)
+        assertEquals(raw, sender.events.single().installReferrer)
+    }
+
+    // The site's last answer is kept, so a launch that cannot ask still follows it. Only "not gated" is written: a
+    // gated site writes nothing before consent, and no answer kept reads as gated.
+    @Test
+    fun `the site's last answer is kept only when it is not gated`() {
+        initialise(RecordingSender(gated = false), referrer = raw)
+        assertEquals(listOf("site_not_consent_gated"), written())
+
+        Trace.resetForTest()
+        referrerReads = 0
+        initialise(RecordingSender(gated = null), referrer = raw)
+        assertEquals("offline, the last answer, not gated, still holds", 1, referrerReads)
+
+        Trace.resetForTest()
+        initialise(RecordingSender(gated = true), referrer = raw)
+        assertEquals("a gated answer removes the kept one", emptyList<String>(), written())
+    }
+
+    @Test
+    fun `once the first open has been reported the site is not asked again`() {
+        initialise(RecordingSender(gated = true), referrer = raw)
+        Trace.setConsent(analytics = true)
+        Trace.awaitIdle()
+
+        Trace.resetForTest()
+        val later = RecordingSender(gated = true)
+        initialise(later, referrer = raw)
+
+        assertEquals(0, later.configAsked)
     }
 
     @Test

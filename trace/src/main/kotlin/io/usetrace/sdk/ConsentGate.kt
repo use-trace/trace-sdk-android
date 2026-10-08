@@ -58,6 +58,15 @@ internal class ConsentGate(
         private set
 
     /**
+     * Puts the Play referrer on the held first open, once it may be read. On a consent gated site it is read only
+     * after a yes, so the first open waits in memory without it until then.
+     */
+    internal fun fillReferrer(referrer: String?): Unit = synchronized(this) {
+        val at = held.indexOfFirst { it.type == EventType.FIRST_OPEN }
+        if (at >= 0) held[at] = held[at].copy(installReferrer = referrer)
+    }
+
+    /**
      * Takes one event: sends it, holds it, or drops it, according to [state].
      *
      * It never reports which of the three happened. A caller that could tell would be tempted to do something about

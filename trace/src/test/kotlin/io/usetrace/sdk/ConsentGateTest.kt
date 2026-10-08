@@ -67,6 +67,9 @@ class ConsentGateTest {
             firstAnswers.add(true)
             return accepts
         }
+
+        // The gate never asks; the site's rule is read by Trace, for the referrer.
+        override fun consentGated(): Boolean? = null
     }
 
     private fun gate(sender: EventSender) = ConsentGate(context, sender)

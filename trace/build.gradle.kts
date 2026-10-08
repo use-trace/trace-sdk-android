@@ -10,7 +10,7 @@ plugins {
 group = "io.usetrace"
 // The one place the version is set. A change to it is a release: it needs release-approved, and the merge publishes it
 // (CLAUDE.md, Releasing). The README's dependency line has to match, which scripts/version.sh checks.
-version = "0.1.0"
+version = "0.2.0"
 
 // The artefact a customer declares, rather than the module name.
 base.archivesName.set("trace-sdk-android")

@@ -59,7 +59,10 @@ jobs:
           fi
           mkdir -p "$RUNNER_TEMP/trace/scripts" "$RUNNER_TEMP/trace/docs/legal"
           for f in scripts/check-legal-compliance.mjs docs/legal/claims.json; do
-            gh api -H "Accept: application/vnd.github.raw" "repos/use-trace/trace/contents/$f?ref=main" > "$RUNNER_TEMP/trace/$f"
+            if ! gh api -H "Accept: application/vnd.github.raw" "repos/use-trace/trace/contents/$f?ref=main" > "$RUNNER_TEMP/trace/$f"; then
+              echo "::error title=Legal check not fetched::AGENT_GITHUB_TOKEN cannot read $f from use-trace/trace. Give the token read access to that repository's contents."
+              exit 1
+            fi
           done
       - name: Legal approval
         id: approval

@@ -10,6 +10,10 @@ updates:
       # Use. That is a decision for a person, not a Dependabot merge. 5 is still offered.
       - dependency-name: gradle/actions
         versions: [">= 6"]
+    exclude-paths:
+      # A byte for byte copy of use-trace/trace's pr-loop.yml, whose action pins use-trace/trace owns. A bump here
+      # would only make the copy drift; use-trace/trace's workflow-copies.yml brings its bumps over in a pull request.
+      - .github/workflows/pr-loop.yml
   - package-ecosystem: gradle
     directory: /
     schedule:

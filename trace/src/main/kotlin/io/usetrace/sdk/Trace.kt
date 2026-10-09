@@ -101,9 +101,22 @@ public object Trace {
 
     // The Play referrer, which is information held on the device, so reading it is access that needs consent where
     // consent is required (the legal adviser's answer, decided by Dom on 8 October 2026). The first open is held
-    // without it until it may be read: after a yes on a consent gated site, at launch on a US or Other site unless
-    // the person refused. Play keeps it for 90 days, so a later yes still gets it. Touched on the SDK's own thread only.
+    // without it until it may be read: after a yes on a consent gated site, and on a US or Other site at the end of
+    // the grace period unless the person refused. Play keeps it for 90 days, so a later yes still gets it. These three
+    // are touched on the SDK's own thread only.
     private var readReferrer: (() -> Unit)? = null
+    private var siteGated: Boolean = true
+    private var graceEnded: Boolean = false
+
+    /**
+     * On a site that is not gated the referrer is read only once this long after [initialise], so that an answer the
+     * app passes in that time is applied first, whatever the network does. [endGrace] queues the end behind every call
+     * made before it; the launch, which fills in the site's answer, is queued first.
+     */
+    internal const val GRACE_MILLIS: Long = 5_000
+
+    /** The grace period in force; null in the tests, where it ends only through [endGrace]. */
+    internal var graceMillis: Long? = GRACE_MILLIS
 
     /**
      * Starts the SDK and reports the install, once, with whatever the Play Store says produced it.
@@ -114,8 +127,9 @@ public object Trace {
      *
      * It returns immediately. Asking the site whether it is consent gated, reading the referrer and recording the
      * first open happen on the SDK's own thread afterwards. **The referrer follows the site's region**: on a consent
-     * gated site (UK and EU, or no region, or no answer) it is read only after a yes; on a US or Other site at launch,
-     * after any answer the app passes straight after this call, unless that answer is a no.
+     * gated site (UK and EU, or no region, or no answer) it is read only after a yes; on a US or Other site five
+     * seconds after this call, behind every call the app made in that time, unless one of them was a no. A no after
+     * that discards the read referrer with the first open, unsent.
      *
      * **The first open is held in memory until [setConsent] is called**, and nothing is written to the device before
      * then. So nothing reaches Trace until the host app has said what the person answered, and an app that never
@@ -281,6 +295,12 @@ public object Trace {
             // the first open it is meant to release.
             val fetch = fetchReferrer ?: InstallReferrer::fetch
             submit { sendFirstOpenIfNeeded(application, newGate, transport, fetch) }
+            graceMillis?.let { millis ->
+                Thread({
+                    runCatching { Thread.sleep(millis) }
+                    endGrace()
+                }, "$THREAD_NAME-grace").apply { isDaemon = true }.start()
+            }
         }
     }
 
@@ -307,16 +327,27 @@ public object Trace {
             ),
         )
         readReferrer = { gate.fillReferrer(awaitReferrer(context, fetchReferrer)) }
-        // On a site that is not gated it is read at launch, behind the answer the app passes straight after
-        // initialise, so a refusal passed then comes first and nothing is read.
-        if (!gated) {
-            submit {
-                if (gate.state == ConsentState.UNKNOWN) readReferrer?.invoke()
-                if (gate.state != ConsentState.GRANTED) readReferrer = null
-            }
-        }
+        siteGated = gated
+        readReferrerIfGraceAllows(gate)
         // No flag here. The gate writes it when the first open is sent, so a launch that ends before an answer
         // writes nothing and the next launch reports the install instead.
+    }
+
+    /**
+     * Ends the grace period, behind every call made so far: on a site that is not gated, with no answer yet, the
+     * referrer is read now. A refusal made before this has already discarded the first open and the read.
+     */
+    internal fun endGrace() {
+        submit {
+            graceEnded = true
+            gate?.let { readReferrerIfGraceAllows(it) }
+        }
+    }
+
+    private fun readReferrerIfGraceAllows(gate: ConsentGate) {
+        if (!graceEnded || siteGated || gate.state != ConsentState.UNKNOWN) return
+        readReferrer?.invoke()
+        readReferrer = null
     }
 
     // The site's answer is kept only when it is "not gated", so a gated site writes nothing before consent. No answer
@@ -428,6 +459,9 @@ public object Trace {
             appContext = null
             gate = null
             readReferrer = null
+            siteGated = true
+            graceEnded = false
+            graceMillis = GRACE_MILLIS
             referrerDeadlineMillis = REFERRER_DEADLINE_MILLIS
         }
     }

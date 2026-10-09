@@ -42,7 +42,7 @@ new Android projects have already, add:
 
 ```kotlin
 dependencies {
-    implementation("io.usetrace:trace-sdk-android:0.2.0")
+    implementation("io.usetrace:trace-sdk-android:0.2.1")
 }
 ```
 
@@ -129,11 +129,16 @@ launch it asks Trace, with your api key, whether the site is consent gated (`GET
 | Your site's region | Before the person answers | After a yes | After a no |
 | --- | --- | --- | --- |
 | UK and EU, or no region set | The referrer is not read. The first open waits in memory without it. | The referrer is read, then the first open is sent with it. | The referrer is never read. |
-| US or Other | The referrer is read at launch and held in memory with the first open. | The first open is sent with it. | The referrer is not read, or what was read is discarded with the first open. |
+| US or Other | Five seconds after `initialise`, the referrer is read and held in memory with the first open. | Read at once if it was not, then the first open is sent with it. | Not read if the no came within those five seconds; otherwise what was read is discarded with the first open, unsent. |
 
 If the SDK cannot ask (no network, an older API) and has no earlier "not gated" answer, it treats the site as consent
-gated. The answer your app passes straight after `initialise` is handled before the SDK reads the referrer, so on a
-US or Other site a stored refusal stops the read. Once the first open has been reported the SDK does not ask again.
+gated. Once the first open has been reported the SDK does not ask again.
+
+On a US or Other site the SDK waits five seconds after `initialise` before reading the referrer, whatever the network
+does, and applies every call your app made in that time first. So a stored refusal passed within five seconds of
+`initialise` means the referrer is never read. A refusal that arrives later comes after the read, which a US or Other
+site allows: the referrer was only held in memory, and the refusal discards it with the first open, unsent. On a UK or
+EU site the referrer is never read before a yes, however late the answer comes.
 
 ## What is stored on the device, and when
 

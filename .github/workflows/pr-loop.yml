@@ -210,11 +210,11 @@ jobs:
       RUN_ID: ${{ github.event.workflow_run.id }}
       RUN_NAME: ${{ github.event.workflow_run.name }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
         with:
           fetch-depth: 0
       - name: Check out the loop's trusted scripts
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
         with:
           repository: use-trace/trace
           ref: main
@@ -328,7 +328,7 @@ jobs:
       RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
     steps:
       - name: Check out the loop's trusted scripts
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
         with:
           repository: use-trace/trace
           ref: main
@@ -371,7 +371,7 @@ jobs:
           if [ "${files:-0}" -gt 20 ]; then turns=120; fi
           if [ "${files:-0}" -gt 60 ]; then turns=180; fi
           echo "turns=$turns" >> "$GITHUB_OUTPUT"
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
         if: steps.pre.outputs.ready == 'true' && steps.switch.outputs.enabled != 'false'
         with:
           ref: ${{ github.event.workflow_run.head_sha }}
@@ -422,7 +422,7 @@ jobs:
             --allowedTools "mcp__github_inline_comment__create_inline_comment,Bash(gh pr diff:*),Bash(gh pr view:*),Bash(git diff:*),Bash(git log:*),Bash(git show:*),Read,Grep,Glob"
       - name: Check out the loop's trusted scripts again
         if: always() && steps.claude.outcome != 'skipped'
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
         with:
           repository: use-trace/trace
           ref: main
@@ -488,7 +488,7 @@ jobs:
       RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
     steps:
       - name: Check out the loop's trusted scripts
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
         with:
           repository: use-trace/trace
           ref: main
@@ -519,7 +519,7 @@ jobs:
           gh api -X POST "repos/$GITHUB_REPOSITORY/statuses/$SHA" -f state=failure -f context="$GATE" -f description="The fixer could not run; see the pull request" -f target_url="$RUN_URL" > /dev/null
           gh pr edit "$PR" --repo "$GITHUB_REPOSITORY" --add-label needs-human
           gh pr comment "$PR" --repo "$GITHUB_REPOSITORY" --body "Round $ROUND needed a fix, but the fixer could not run: $REASON. A person needs to look; add loop-reset once it is fixed."
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
         if: steps.pre.outputs.ready == 'true' && steps.switch.outputs.enabled != 'false'
         with:
           ref: ${{ github.event.workflow_run.head_branch }}
@@ -527,7 +527,7 @@ jobs:
           token: ${{ secrets.AGENT_GITHUB_TOKEN || github.token }}
           fetch-depth: 0
       # A repository without .nvmrc (the plugin, the SDKs) uses the runner's own PHP and Composer, Java or Xcode.
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@v6
         if: steps.pre.outputs.ready == 'true' && steps.switch.outputs.enabled != 'false' && hashFiles('.nvmrc') != ''
         with:
           node-version-file: .nvmrc
@@ -593,7 +593,7 @@ jobs:
           gh pr comment "$PR" --repo "$GITHUB_REPOSITORY" --body "Round $ROUND: $what ([run]($RUN_URL)). A person needs to look; add loop-reset to start the loop again."
       - name: Check out the loop's trusted scripts again
         if: always()
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
         with:
           repository: use-trace/trace
           ref: main

@@ -43,6 +43,7 @@ class FirstOpenEndToEndTest {
     @Before
     fun setUp() {
         Trace.resetForTest()
+        Trace.graceMillis = null
         shadowOf(context.packageManager).getInternalMutablePackageInfo(context.packageName).versionName = "4.2.0"
     }
 

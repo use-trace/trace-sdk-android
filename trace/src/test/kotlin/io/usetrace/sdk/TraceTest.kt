@@ -41,6 +41,8 @@ class TraceTest {
     @Before
     fun setUp() {
         Trace.resetForTest()
+        // The grace period ends only when a test ends it, so every ordering here is driven, never timed.
+        Trace.graceMillis = null
         TraceLog.redirect { lines.add(it) }
         shadowOf(context.packageManager).getInternalMutablePackageInfo(context.packageName).versionName = "4.2.0"
     }
@@ -85,10 +87,8 @@ class TraceTest {
             true
         }
 
-        // A real request takes a moment, as the network does, which is what lets the answer a host app passes
-        // straight after initialise arrive before the SDK decides whether to read the referrer.
+        // Answers at once. Nothing in the SDK's ordering depends on how long the site takes to answer.
         override fun consentGated(): Boolean? {
-            Thread.sleep(50)
             synchronized(this) { configAsked++ }
             return gated
         }
@@ -113,6 +113,7 @@ class TraceTest {
         debugLogging: Boolean = true,
     ) {
         Trace.initialise(context, config(debugLogging), sender, playClient(referrer, answers))
+        Trace.endGrace()
         Trace.awaitIdle()
     }
 
@@ -159,21 +160,60 @@ class TraceTest {
     }
 
     @Test
-    fun `a refusal never reads the referrer, in either region`() {
+    fun `a refusal within the grace period means the referrer is never read, in either region`() {
         for (gated in listOf(true, false)) {
             Trace.resetForTest()
+            Trace.graceMillis = null
             referrerReads = 0
 
             Trace.initialise(context, config(), RecordingSender(gated), playClient())
+            Trace.awaitIdle()
+            assertEquals("gated=$gated: nothing is read before the grace period ends", 0, referrerReads)
             Trace.setConsent(analytics = false)
+            Trace.endGrace()
             Trace.awaitIdle()
 
-            assertEquals("gated=$gated: the answer passed at launch comes before the read", 0, referrerReads)
+            assertEquals("gated=$gated: a refusal within the grace period comes before the read", 0, referrerReads)
         }
     }
 
+    // On a site that is not gated the referrer is read once the grace period after initialise is over, behind every
+    // call made before it ends, and never earlier, however fast the site answers. A refusal after it comes too late
+    // to stop the read, which a US or Other site allows (an opt out): the referrer was held in memory only, and the
+    // refusal discards it with the first open, unsent. On a gated site the end of the grace period reads nothing.
     @Test
-    fun `on a site that is not gated the referrer is read at launch, before an answer`() {
+    fun `on a site that is not gated a refusal after the grace period discards what was read, unsent`() {
+        val sender = RecordingSender(gated = false)
+        Trace.initialise(context, config(), sender, playClient())
+        Trace.awaitIdle()
+        assertEquals("the site's answer alone reads nothing", 0, referrerReads)
+        Trace.endGrace()
+        Trace.awaitIdle()
+        assertEquals(1, referrerReads)
+
+        Trace.setConsent(analytics = false)
+        Trace.awaitIdle()
+
+        assertEquals(1, referrerReads)
+        assertFalse("the first open, referrer and all, is never sent", sender.calls.any { it.startsWith("event") })
+    }
+
+    @Test
+    fun `on a gated site the end of the grace period reads nothing`() {
+        Trace.initialise(context, config(), RecordingSender(gated = true), playClient())
+        Trace.endGrace()
+        Trace.awaitIdle()
+
+        assertEquals(0, referrerReads)
+    }
+
+    @Test
+    fun `the grace period is five seconds`() {
+        assertEquals(5_000L, Trace.GRACE_MILLIS)
+    }
+
+    @Test
+    fun `on a site that is not gated the referrer is read once the grace period ends, before an answer`() {
         val sender = RecordingSender(gated = false)
         initialise(sender, referrer = raw)
         assertEquals(1, referrerReads)

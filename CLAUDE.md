@@ -68,8 +68,10 @@ the SDK gets it wrong, which is why they are here rather than in a comment somew
   launch that has not reported the install, the SDK asks `GET /v1/snippet-config?key=` for `consent_gated`, keeps
   only a "not gated" answer (`site_not_consent_gated`, an empty file) and treats no answer as gated. Gated (UK and EU,
   or no region): the referrer is read only after a yes, just before the held first open is sent. Not gated (US,
-  Other): it is read at launch, behind the answer the app passes straight after `initialise`, unless that answer is
-  a no. A refusal never reads it. Do not read it before a yes on a gated site.
+  Other): it is read at the end of a five second grace period after `initialise` (`Trace.GRACE_MILLIS`), whose end
+  is queued behind every call the app made before it, so a refusal within it comes first whatever the network does;
+  never make that ordering depend on how fast a request returns. A refusal after it discards the read referrer with
+  the first open, unsent, which an opt out site allows. Do not read it before a yes on a gated site.
 - **Nothing identifying is written to the device before consent** (decided 6 October 2026, before the first release). Before an
   answer the first open and every conversion are held in memory only and no install id exists. A grant writes
   `install_id` and, once the first open has been sent, `first_open_sent`. The only other file is the empty

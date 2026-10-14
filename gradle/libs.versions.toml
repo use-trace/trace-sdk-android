@@ -2,7 +2,7 @@
 # Android Gradle plugin 9 needs Gradle 9.1 or later, which the wrapper pins. gradle.properties keeps it from compiling
 # Kotlin itself, for now: see the comment there.
 agp = "9.4.1"
-kotlin = "2.4.20"
+kotlin = "2.4.21"
 # The only runtime dependency this SDK is allowed. Nothing else can read the Play Store install referrer.
 installreferrer = "2.2"
 junit = "4.13.2"

@@ -13,6 +13,12 @@ name: PR loop
 # re-run the failed CI jobs so their checks see the label. When the branch updater only merges main
 # in, an approval carries over and no round is used. The decisions live in scripts/pr-loop.mjs.
 #
+# Risk tiers (this repository only, scripts/pr-risk-tier.mjs, docs/DELIVERY.md "Risk tiers"): a low pull request
+# passes review-gate without an AI review once CI passes; a high one, or one with full-tests, is approved as usual
+# but review-gate stays pending until a `staging` success holds for its head (the same tree, or an earlier commit of
+# the pull request whose protected files are unchanged, so merging main in never asks for staging again). The
+# `staging passed` job turns such a gate green when a Staging run finishes. full-tests re-runs CI in full.
+#
 # Agent steps run code from the pull request, so trusted steps (preflight, Bridge, the decision script)
 # always run from use-trace/trace's main branch, checked out into .trace-loop, and the pull request is checked
 # out only for the agent.
@@ -37,7 +43,7 @@ on:
   pull_request:
     types: [opened, synchronize, reopened, ready_for_review, labeled]
   workflow_run:
-    workflows: [CI]
+    workflows: [CI, Staging]
     types: [completed]
   workflow_call:
     inputs:
@@ -144,7 +150,7 @@ jobs:
     if: >-
       github.event_name == 'pull_request' && github.event.action == 'labeled'
       && github.event.pull_request.head.repo.full_name == github.repository
-      && contains(fromJSON('["review-waived","loop-reset","legal-approved","tracking-gap-approved","release-approved"]'), github.event.label.name)
+      && contains(fromJSON('["review-waived","loop-reset","legal-approved","tracking-gap-approved","release-approved","full-tests"]'), github.event.label.name)
     runs-on: ubuntu-24.04
     timeout-minutes: 5
     env:
@@ -164,6 +170,20 @@ jobs:
             if [ -z "$run" ] || [ -z "$AGENT_TOKEN" ]; then echo "Nothing to re-run (CI still running, already green, or no agent token)."; exit 0; fi
             GH_TOKEN="$AGENT_TOKEN" gh run rerun "$run" --failed --repo "$GITHUB_REPOSITORY"
             echo "Re-running the failed jobs of CI run $run so they see $LABEL."
+            exit 0
+          fi
+          # A low pull request ran CI without its slow suites and passed the gate without a review. Hold the gate and
+          # run CI again, which now reads the label and runs everything; a run still going is cancelled first.
+          if [ "$LABEL" = "full-tests" ]; then
+            gh api -X POST "repos/$GITHUB_REPOSITORY/statuses/$SHA" -f state=pending -f context="$GATE" -f description="full-tests added: CI runs again in full" > /dev/null
+            run=$(gh run list --repo "$GITHUB_REPOSITORY" --workflow "$CI_WORKFLOW" --commit "$SHA" --limit 1 --json databaseId --jq '.[0].databaseId // empty')
+            if [ -z "$run" ] || [ -z "$AGENT_TOKEN" ]; then echo "No CI run to re-run (or no agent token); the next push runs in full."; exit 0; fi
+            if [ "$(gh run view "$run" --repo "$GITHUB_REPOSITORY" --json status --jq .status)" != "completed" ]; then
+              GH_TOKEN="$AGENT_TOKEN" gh run cancel "$run" --repo "$GITHUB_REPOSITORY" || true
+              gh run watch "$run" --repo "$GITHUB_REPOSITORY" > /dev/null || true
+            fi
+            GH_TOKEN="$AGENT_TOKEN" gh run rerun "$run" --repo "$GITHUB_REPOSITORY"
+            echo "Re-running CI run $run in full."
             exit 0
           fi
           if [ "$LABEL" = "review-waived" ]; then
@@ -192,6 +212,7 @@ jobs:
       && github.event.workflow_run.head_branch != 'main'
       && github.event.workflow_run.conclusion != 'cancelled'
       && github.event.workflow_run.conclusion != 'skipped'
+      && github.event.workflow_run.name != 'Staging'
     runs-on: ubuntu-24.04
     timeout-minutes: 10
     concurrency:
@@ -201,6 +222,9 @@ jobs:
       action: ${{ steps.decide.outputs.action }}
       round: ${{ steps.decide.outputs.round }}
       pr: ${{ steps.decide.outputs.pr }}
+      tier: ${{ steps.decide.outputs.tier }}
+      base: ${{ steps.decide.outputs.base }}
+      full_tests: ${{ steps.decide.outputs.full_tests }}
     env:
       GH_TOKEN: ${{ github.token }}
       BRANCH: ${{ github.event.workflow_run.head_branch }}
@@ -228,6 +252,12 @@ jobs:
         id: decide
         run: |
           status() { gh api -X POST "repos/$GITHUB_REPOSITORY/statuses/$SHA" -f state="$1" -f context="$GATE" -f description="$2" -f target_url="$RUN_URL" > /dev/null; }
+          # Posts a comment once per marker, so a re-run says nothing new.
+          once() {
+            if ! jq -e --arg bot "github-actions[bot]" --arg m "$1" 'select(.author == $bot and (.body | contains($m)))' "$RUNNER_TEMP/comments.jsonl" > /dev/null; then
+              gh pr comment "$number" --repo "$GITHUB_REPOSITORY" --body "$1$2"
+            fi
+          }
           pr=$(gh pr list --repo "$GITHUB_REPOSITORY" --head "$BRANCH" --state open --json number,headRefOid,isDraft,baseRefName --jq '.[0] // empty')
           if [ -z "$pr" ]; then echo "No open pull request for this branch."; echo "action=skip" >> "$GITHUB_OUTPUT"; exit 0; fi
           number=$(jq -r .number <<< "$pr")
@@ -238,8 +268,11 @@ jobs:
           labels=$(gh pr view "$number" --repo "$GITHUB_REPOSITORY" --json labels --jq '[.labels[].name] | join(",")')
           gh api "repos/$GITHUB_REPOSITORY/issues/$number/comments" --paginate --jq '.[] | {author: .user.login, body}' > "$RUNNER_TEMP/comments.jsonl"
 
-          # An approval carries over a commit that only merges main in with no conflict resolution.
+          # An approval carries over a commit that only merges main in with no conflict resolution. A high risk tier approval
+          # still waiting for staging is an approval; a low tier pass is not one, since no review ran.
           clean=false
+          wait_text=$(node --input-type=module -e "import { STAGING_WAIT } from './.trace-loop/scripts/pr-loop.mjs'; console.log(STAGING_WAIT)")
+          low_text=$(node --input-type=module -e "import { LOW_TIER } from './.trace-loop/scripts/pr-loop.mjs'; console.log(LOW_TIER)")
           cleanparent=""
           git cat-file -e "$SHA^{commit}" 2> /dev/null || git fetch --no-tags -q origin "$SHA" || true
           read -r _ p1 p2 _ <<< "$(git rev-list --parents -n 1 "$SHA" 2> /dev/null) "
@@ -253,8 +286,9 @@ jobs:
             # finishes, the merge in between never gets a gate status. On 11 September 2026 #145 lost its round 5
             # approval that way and stopped. The commit found is also where a changes verdict is looked up.
             for _ in 1 2 3 4 5 6 7 8 9 10; do
-              previous=$(gh api "repos/$GITHUB_REPOSITORY/commits/$cleanparent/statuses" --jq "[.[] | select(.context == \"$GATE\")][0].state // empty")
-              if [ "$previous" = "success" ]; then clean=true; break; fi
+              previous=$(gh api "repos/$GITHUB_REPOSITORY/commits/$cleanparent/statuses" | jq -r --arg gate "$GATE" --arg wait "$wait_text" --arg low "$low_text" \
+                '[.[] | select(.context == $gate)][0] // {} | if (.state == "success" and .description != $low) or .description == $wait then "approved" else "no" end')
+              if [ "$previous" = "approved" ]; then clean=true; break; fi
               read -r _ q1 q2 _ <<< "$(git rev-list --parents -n 1 "$cleanparent" 2> /dev/null) "
               if [ -n "${q2:-}" ] && git merge-base --is-ancestor "$q2" "origin/$base" && [ -z "$(git show --remerge-diff --format= "$cleanparent")" ]; then
                 cleanparent="$q1"
@@ -275,9 +309,25 @@ jobs:
             fi
           fi
 
+          # The risk tier, from main's rules (scripts/pr-risk-tier.mjs). Only this repository has tiers; a side repository
+          # calling the loop passes none and keeps the loop as it was. A tier that cannot be worked out is high. A high
+          # pull request also needs a staging success that still holds for this commit before the gate turns green.
+          tier=""
+          stagingok=false
+          fulltests=false
+          if grep -q ',full-tests,' <<< ",$labels,"; then fulltests=true; fi
+          if [ "$GITHUB_REPOSITORY" = "use-trace/trace" ]; then
+            tier=$(node .trace-loop/scripts/pr-risk-tier.mjs classify --base "origin/$base" --head "$SHA" --labels "$labels" | jq -r .tier) || tier=high
+            [ -n "$tier" ] || tier=high
+            if [ "$tier" = "high" ]; then
+              stagingok=$(node .trace-loop/scripts/pr-risk-tier.mjs staging --pr "$number" --head "$SHA" --base "origin/$base" --full-tests "$fulltests" | jq -r .ok) || stagingok=false
+            fi
+          fi
+          { echo "tier=$tier"; echo "base=$base"; echo "full_tests=$fulltests"; } >> "$GITHUB_OUTPUT"
+
           node .trace-loop/scripts/pr-loop.mjs decide --comments "$RUNNER_TEMP/comments.jsonl" --sha "$SHA" --ci "$CI_RESULT" \
             --labels "$labels" --clean-merge-approved "$clean" --clean-merge-parent "$cleanparent" --failed-jobs "$RUNNER_TEMP/failed-jobs.json" \
-            --max "$MAX_ROUNDS" --ci-name "$CI_WORKFLOW" --run-name "$RUN_NAME" > "$RUNNER_TEMP/decision.json"
+            --max "$MAX_ROUNDS" --ci-name "$CI_WORKFLOW" --run-name "$RUN_NAME" --tier "$tier" --staging-ok "$stagingok" > "$RUNNER_TEMP/decision.json"
           cat "$RUNNER_TEMP/decision.json"
           action=$(jq -r .action "$RUNNER_TEMP/decision.json")
           if [ "$action" = "skip" ]; then echo "action=skip" >> "$GITHUB_OUTPUT"; exit 0; fi
@@ -306,6 +356,12 @@ jobs:
             if ! jq -e --arg bot "github-actions[bot]" --arg m "$mark" 'select(.author == $bot and (.body | contains($m)))' "$RUNNER_TEMP/comments.jsonl" > /dev/null; then
               gh pr comment "$number" --repo "$GITHUB_REPOSITORY" --body "$mark**PR loop** for \`${SHA:0:7}\`: $desc"
             fi
+          fi
+          if [ "$action" = "low-tier" ]; then
+            once "<!-- trace-pr-loop low-tier sha=$SHA -->" "**PR loop** for \`${SHA:0:7}\`: low risk tier (docs, tests, styles or images only), so review-gate passes without an AI review once CI passes. The next push works the tier out again; add full-tests to run everything and have it reviewed."
+          fi
+          if [ "$(jq -r '.staging // empty' "$RUNNER_TEMP/decision.json")" = "waiting" ]; then
+            once "<!-- trace-pr-loop staging sha=$SHA -->" "**PR loop** for \`${SHA:0:7}\`: approved, and this is a high risk tier pull request, so review-gate turns green once staging passes for it. Add the staging label or run the Staging workflow for this branch. A later commit that only merges main in, or leaves the protected files as they were, keeps the result."
           fi
           status "$gate" "$desc"
           echo "action=$action" >> "$GITHUB_OUTPUT"
@@ -339,7 +395,10 @@ jobs:
           token: ${{ secrets.AGENT_GITHUB_TOKEN || github.token }}
           persist-credentials: false
       - name: Keep the decision script from the default branch
-        run: cp .trace-loop/scripts/pr-loop.mjs "$RUNNER_TEMP/pr-loop.mjs"
+        run: |
+          cp .trace-loop/scripts/pr-loop.mjs "$RUNNER_TEMP/pr-loop.mjs"
+          mkdir -p "$RUNNER_TEMP/tier"
+          cp .trace-loop/scripts/pr-risk-tier.mjs .trace-loop/scripts/check-legal-compliance.mjs .trace-loop/scripts/check-tracking-gaps.mjs "$RUNNER_TEMP/tier/"
       - name: Agent preflight
         id: pre
         uses: ./.trace-loop/.github/actions/agent-preflight
@@ -437,9 +496,22 @@ jobs:
         if: always() && steps.claude.outcome != 'skipped'
         env:
           EXECUTION_FILE: ${{ steps.claude.outputs.execution_file }}
+          TIER: ${{ needs.round.outputs.tier }}
+          BASE: ${{ needs.round.outputs.base }}
+          FULL_TESTS: ${{ needs.round.outputs.full_tests }}
         run: |
-          node "$RUNNER_TEMP/pr-loop.mjs" review --execution-file "${EXECUTION_FILE:-/nonexistent}" --sha "$SHA" --round "$ROUND" --max "$MAX_ROUNDS" > "$RUNNER_TEMP/review.json"
+          # A high pull request's approval waits for staging, looked up now: it may have passed while the review ran.
+          stagingok=false
+          if [ "$TIER" = "high" ]; then
+            git fetch --no-tags -q origin "+refs/heads/$BASE:refs/remotes/origin/$BASE" || true
+            stagingok=$(node "$RUNNER_TEMP/tier/pr-risk-tier.mjs" staging --pr "$PR" --head "$SHA" --base "origin/$BASE" --full-tests "$FULL_TESTS" | jq -r .ok) || stagingok=false
+          fi
+          node "$RUNNER_TEMP/pr-loop.mjs" review --execution-file "${EXECUTION_FILE:-/nonexistent}" --sha "$SHA" --round "$ROUND" --max "$MAX_ROUNDS" \
+            --tier "$TIER" --staging-ok "$stagingok" > "$RUNNER_TEMP/review.json"
           jq -r .comment "$RUNNER_TEMP/review.json" > "$RUNNER_TEMP/verdict.md"
+          if [ "$(jq -r '.staging // empty' "$RUNNER_TEMP/review.json")" = "waiting" ]; then
+            printf '\n%s\n' "This is a high risk tier pull request, so review-gate turns green once staging passes for it. Add the staging label or run the Staging workflow for this branch." >> "$RUNNER_TEMP/verdict.md"
+          fi
           gh pr comment "$PR" --repo "$GITHUB_REPOSITORY" --body-file "$RUNNER_TEMP/verdict.md"
           add=$(jq -r '.addLabel // empty' "$RUNNER_TEMP/review.json")
           if [ -n "$add" ]; then gh pr edit "$PR" --repo "$GITHUB_REPOSITORY" --add-label "$add"; fi
@@ -469,6 +541,45 @@ jobs:
           outcome: ${{ steps.claude.outcome == 'failure' && 'fail' || 'ok' }}
           detail: "${{ format('PR {0}: rules check ran with the T19 review ({1})', needs.round.outputs.pr, steps.claude.outcome) }}"
           trigger: github workflow_run
+
+  # A Staging run finished: every open pull request whose approval was waiting for staging (high risk tier) gets
+  # review-gate green once a staging success holds for its head. Main's scripts decide, as in every other job.
+  staging-passed:
+    name: staging passed
+    needs: ready
+    if: >-
+      needs.ready.outputs.ok == 'true'
+      && github.repository == 'use-trace/trace'
+      && github.event_name == 'workflow_run'
+      && github.event.workflow_run.name == 'Staging'
+      && github.event.workflow_run.conclusion == 'success'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    env:
+      GH_TOKEN: ${{ github.token }}
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          ref: main
+          fetch-depth: 0
+      - name: Turn the gate green where staging now holds
+        run: |
+          wait=$(node --input-type=module -e "import { STAGING_WAIT } from './scripts/pr-loop.mjs'; console.log(STAGING_WAIT)")
+          passed=$(node --input-type=module -e "import { STAGING_PASSED } from './scripts/pr-loop.mjs'; console.log(STAGING_PASSED)")
+          gh pr list --repo "$GITHUB_REPOSITORY" --state open --json number,headRefOid,baseRefName,labels \
+            --jq '.[] | "\(.number) \(.headRefOid) \(.baseRefName) \([.labels[].name] | index("full-tests") != null)"' |
+          while read -r pr sha base fulltests; do
+            desc=$(gh api "repos/$GITHUB_REPOSITORY/commits/$sha/statuses" --jq "[.[] | select(.context == \"$GATE\")][0] | select(.state == \"pending\") | .description")
+            [ "$desc" = "$wait" ] || continue
+            git fetch --no-tags -q origin "$sha" "+refs/heads/$base:refs/remotes/origin/$base" || continue
+            ok=$(node scripts/pr-risk-tier.mjs staging --pr "$pr" --head "$sha" --base "origin/$base" --full-tests "$fulltests" | jq -r .ok) || ok=false
+            if [ "$ok" = "true" ]; then
+              gh api -X POST "repos/$GITHUB_REPOSITORY/statuses/$sha" -f state=success -f context="$GATE" -f description="$passed" > /dev/null
+              echo "#$pr: staging holds for ${sha:0:7}; review-gate is green."
+            else
+              echo "#$pr: still waiting for staging on ${sha:0:7}."
+            fi
+          done
 
   fix:
     name: fix

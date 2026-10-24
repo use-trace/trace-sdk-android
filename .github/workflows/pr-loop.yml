@@ -210,7 +210,6 @@ jobs:
       && github.event.workflow_run.event == 'pull_request'
       && github.event.workflow_run.head_repository.full_name == github.repository
       && github.event.workflow_run.head_branch != 'main'
-      && github.event.workflow_run.conclusion != 'cancelled'
       && github.event.workflow_run.conclusion != 'skipped'
       && github.event.workflow_run.name != 'Staging'
     runs-on: ubuntu-24.04
@@ -299,11 +298,12 @@ jobs:
           fi
 
           # The failed jobs and their failed steps, so a run that only waits for an approval label uses no round.
-          # If they cannot be read, the run counts as an ordinary failure.
+          # If they cannot be read, a failed run counts as an ordinary failure. A cancelled run is a failure only with a
+          # failed job, as when CI fails fast (docs/DELIVERY.md); a job that failed a step and was then cancelled counts.
           echo '[]' > "$RUNNER_TEMP/failed-jobs.json"
-          if [ "$CI_RESULT" = "failure" ]; then
+          if [ "$CI_RESULT" = "failure" ] || [ "$CI_RESULT" = "cancelled" ]; then
             if ! gh api "repos/$GITHUB_REPOSITORY/actions/runs/$RUN_ID/jobs" --paginate \
-              --jq '.jobs[] | select(.conclusion == "failure") | {name, failedSteps: [.steps[] | select(.conclusion == "failure") | .name]}' \
+              --jq '.jobs[] | select(.conclusion == "failure" or any(.steps[]?; .conclusion == "failure")) | {name, failedSteps: [.steps[] | select(.conclusion == "failure") | .name]}' \
               | jq -s . > "$RUNNER_TEMP/failed-jobs.json"; then
               echo '[]' > "$RUNNER_TEMP/failed-jobs.json"
             fi

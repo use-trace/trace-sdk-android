@@ -446,6 +446,9 @@ jobs:
         with:
           claude_code_oauth_token: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
           github_token: ${{ secrets.AGENT_GITHUB_TOKEN || github.token }}
+          # CI on a Dependabot commit runs as dependabot[bot], and the action refuses a bot actor not listed here, so
+          # trace-sdk-android#52 got no verdict twice. The reviewer only reads and comments; the fixer stays closed.
+          allowed_bots: dependabot
           prompt: |
             You are the pull request reviewer for Trace (usetrace.io), a privacy first marketing attribution product. Tracking quality and accuracy come first: a change that could make Trace record, stitch, attribute, count or value visitors wrongly is the most serious kind of defect.
 
